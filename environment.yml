@@ -1,0 +1,83 @@
+name: kivi
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.10.20
+  - pip
+
+  - pip:
+    # ── PyTorch (CUDA 11.8) ───────────────────────────────────────────────────
+    # Install via: pip install torch==2.4.1 --index-url https://download.pytorch.org/whl/cu118
+    - torch==2.4.1+cu118
+    - torchvision
+    - torchaudio
+
+    # ── Core ML libraries ─────────────────────────────────────────────────────
+    - transformers==4.43.1
+    - tokenizers==0.19.1
+    - accelerate==1.13.0
+    - safetensors==0.7.0
+    - huggingface-hub==0.36.2
+    - datasets==4.8.4
+    - sentencepiece==0.2.1
+    - peft==0.18.1
+
+    # ── Triton (quantization kernels) ─────────────────────────────────────────
+    - triton==3.0.0
+
+    # ── FlashAttention (optional, requires Ampere+ GPU / sm_80+) ─────────────
+    # V100 (sm_70) users: skip this, set config.use_flash = False in run scripts
+    # Install via: pip install flash-attn==2.8.3 --no-build-isolation
+    - flash-attn==2.8.3
+
+    # ── Evaluation ────────────────────────────────────────────────────────────
+    - lm-eval==0.4.2
+    - evaluate==0.4.6
+    - rouge-score==0.1.2
+    - sacrebleu==2.6.0
+    - nltk==3.9.4
+    - word2number==1.1
+
+    # ── Numerics / data ───────────────────────────────────────────────────────
+    - numpy==2.2.6
+    - scipy==1.15.3
+    - scikit-learn==1.7.2
+    - pandas==2.3.3
+    - pyarrow==23.0.1
+
+    # ── Utilities ─────────────────────────────────────────────────────────────
+    - tqdm==4.67.3
+    - requests==2.33.1
+    - filelock==3.25.2
+    - packaging==24.0
+    - einops==0.8.2
+    - sympy==1.14.0
+    - networkx==3.4.2
+    - pyyaml==6.0.3
+    - regex==2026.4.4
+    - xxhash==3.6.0
+    - zstandard==0.25.0
+    - multiprocess==0.70.19
+    - dill==0.4.1
+    - jsonlines==4.0.0
+    - tabulate==0.10.0
+    - sqlitedict==2.1.0
+
+# ── Post-install steps (run manually after conda env create) ──────────────────
+#
+# 1. Install PyTorch with correct CUDA URL:
+#    pip install torch==2.4.1 torchvision torchaudio \
+#        --index-url https://download.pytorch.org/whl/cu118
+#
+# 2. Install KIVI quant CUDA kernels (requires torch to be present first):
+#    pip install -e . --no-build-isolation
+#
+# 3. Install flash-attn (Ampere+ GPUs only, skip for V100):
+#    pip install flash-attn==2.8.3 --no-build-isolation
+#
+# 4. Authenticate with HuggingFace (needed for model + GPQA dataset):
+#    huggingface-cli login
