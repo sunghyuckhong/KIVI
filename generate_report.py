@@ -53,7 +53,7 @@ def parse_gsm8k_from_log(log_path):
 def extract_gpqa(data):
     if data is None:
         return None
-    task = data.get("gpqa_diamond_generative_n_shot", {})
+    task = data.get("gpqa_diamond_cot_n_shot", {})
     for key in ("exact_match,flexible-extract", "exact_match,strict-match"):
         if key in task:
             return task[key]

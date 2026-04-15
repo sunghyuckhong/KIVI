@@ -32,7 +32,7 @@ MODEL_PATH = "mistralai/Mistral-7B-Instruct-v0.2"
 
 TASK_CFG = {
     "gsm8k": dict(tasks=["gsm8k"], num_fewshot=5),
-    "gpqa":  dict(tasks=["gpqa_diamond_generative_n_shot"]),
+    "gpqa":  dict(tasks=["gpqa_diamond_cot_n_shot"]),
 }
 
 
@@ -51,16 +51,29 @@ def parse_args():
 
 
 def output_name(args):
-    """Derive a canonical output filename from args (matches legacy script names)."""
+    """Derive a canonical output filename from args.
+
+    Backward-compatible: 2-bit + residual=32 produces the same names as before.
+    New configs encode bits (_intN when N≠2) and residual (_resN when N≠32, _noresidual when N=0).
+    """
     t = args.task
     if args.model == "fp16":
         return f"{t}_fp16"
-    elif args.model == "kivi":
-        return f"{t}_kivi"
+
+    bits_tag = f"_int{args.k_bits}" if args.k_bits != 2 else ""
+
+    if args.residual == 0:
+        res_tag = "_noresidual"
+    elif args.residual != 32:
+        res_tag = f"_res{args.residual}"
+    else:
+        res_tag = ""
+
+    if args.model == "kivi":
+        return f"{t}_kivi{bits_tag}{res_tag}"
     else:  # pertoken
-        flat    = "_flat"       if args.group_size == 128 else ""
-        nores   = "_noresidual" if args.residual   == 0   else ""
-        return f"{t}_pertoken{flat}{nores}"
+        flat = "_flat" if args.group_size == 128 else ""
+        return f"{t}_pertoken{bits_tag}{flat}{res_tag}"
 
 
 def load_model(args):

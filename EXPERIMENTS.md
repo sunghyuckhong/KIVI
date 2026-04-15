@@ -230,4 +230,4 @@ To add a new variant, pass the desired values to `run_eval.py`.
 - **Greedy decoding**: all runs use greedy (temperature=0) via lm-eval defaults.
 - **Seeds**: lm-eval sets `random_seed=0, numpy_seed=1234, torch_seed=1234` by default.
 - **GSM8K**: 5-shot, 1319 test questions, `exact_match` with strict-match and flexible-extract filters.
-- **GPQA Diamond**: `gpqa_diamond_generative_n_shot` task, 198 questions.
+- **GPQA Diamond**: `gpqa_diamond_cot_n_shot` task, 198 questions.
