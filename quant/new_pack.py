@@ -212,7 +212,34 @@ def _minmax_along_last_dim(
 # 								num_warps=8)
 # 	return code.view(B, nh, D, -1), scale.view(scale_mn_shape), mn.view(scale_mn_shape)
 	
-	
+
+
+
+def dequantize_cache_pertoken(data_quant: torch.Tensor, scale: torch.Tensor, mn: torch.Tensor,
+                              group_size: int, bits: int) -> torch.Tensor:
+    """Dequantize a per-token packed KV-cache tensor back to float16.
+
+    data_quant : (B, nh, T, D // feat_per_int)  packed int32
+    scale      : (B, nh, T, D // group_size)
+    mn         : (B, nh, T, D // group_size)
+    Returns    : (B, nh, T, D)  float16
+    """
+    feat_per_int = 32 // bits
+    B, nh, T, packed_D = data_quant.shape
+    D = packed_D * feat_per_int
+
+    # Unpack: each int32 holds feat_per_int quantized values packed at bit-stride
+    shifts = torch.arange(feat_per_int, device=data_quant.device, dtype=torch.int32) * bits
+    # (B, nh, T, packed_D, feat_per_int) -> (B, nh, T, D)
+    quant_ints = ((data_quant.unsqueeze(-1) >> shifts) & ((1 << bits) - 1))
+    quant_ints = quant_ints.reshape(B, nh, T, D)   # int32
+
+    # Expand scale/mn from (B, nh, T, num_groups) -> (B, nh, T, D)
+    scale_exp = scale.unsqueeze(-1).expand(-1, -1, -1, -1, group_size).reshape(B, nh, T, D)
+    mn_exp    = mn   .unsqueeze(-1).expand(-1, -1, -1, -1, group_size).reshape(B, nh, T, D)
+
+    return (quant_ints.float() * scale_exp + mn_exp).to(torch.float16)
+
 
 def triton_quantize_and_pack_along_last_dim(data: torch.Tensor, group_size: int, bit: int):
 	assert len(data.shape) == 4

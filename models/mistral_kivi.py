@@ -134,7 +134,7 @@ class MistralAttention_KIVI(nn.Module):
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
             kv_seq_len += past_key_value[-1]
-        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+        cos, sin = self.rotary_emb(value_states, position_ids)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
         if past_key_value is not None:
@@ -349,7 +349,7 @@ class MistralFlashAttention_KIVI(MistralAttention_KIVI):
 
         # Because the input can be padded, the absolute sequence length depends on the max position id.
         rotary_seq_len = max(kv_seq_len, position_ids[:, -1].max().item()) + 1
-        cos, sin = self.rotary_emb(value_states, seq_len=rotary_seq_len)
+        cos, sin = self.rotary_emb(value_states, position_ids)
 
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
@@ -808,6 +808,11 @@ class MistralModel_KIVI(MistralPreTrainedModel):
         seq_length_with_past = seq_length
         past_key_values_length = 0
 
+        # Normalize empty DynamicCache (transformers 4.43+) to None so KIVI
+        # can initialize its own tuple-based KV cache from scratch.
+        if past_key_values is not None and hasattr(past_key_values, '__len__') and len(past_key_values) == 0:
+            past_key_values = None
+
         if past_key_values is not None:
             # past_key_values_length = past_key_values[0][0].shape[2]
             past_key_values_length = past_key_values[0][-1]
@@ -1040,6 +1045,9 @@ class MistralForCausalLM_KIVI(MistralPreTrainedModel):
     def prepare_inputs_for_generation(
         self, input_ids, past_key_values=None, attention_mask=None, inputs_embeds=None, **kwargs
     ):
+        # Normalize empty DynamicCache (transformers 4.43+) to None
+        if past_key_values is not None and hasattr(past_key_values, '__len__') and len(past_key_values) == 0:
+            past_key_values = None
         # Omit tokens covered by past_key_values
         if past_key_values:
             # past_length = past_key_values[0][0].shape[2]
