@@ -8,6 +8,7 @@ build
 out_*
 *.sh
 !wait_and_report.sh
+!run_all.sh
 *.jsonl
 *.pt
 notebook

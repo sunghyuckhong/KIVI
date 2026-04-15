@@ -112,20 +112,15 @@ models/
 quant/
   new_pack.py                   # + dequantize_cache_pertoken() added
 
-run_gsm8k.py                    # GSM8K — KIVI default (modified: saves JSON, bs=16)
-run_gsm8k_fp16.py               # GSM8K — FP16 baseline
-run_gsm8k_pertoken.py           # GSM8K — PerToken, group=32, residual=32
-run_gsm8k_pertoken_noresidual.py# GSM8K — PerToken, group=32, residual=0
-run_gsm8k_pertoken_flat.py      # GSM8K — PerToken, group=128, residual=32
-run_gsm8k_pertoken_flat_noresidual.py # GSM8K — PerToken, group=128, residual=0
+run_eval.py                     # Unified evaluation script (replaces 12 individual scripts)
+                                #   --model  fp16 | kivi | pertoken
+                                #   --task   gsm8k | gpqa
+                                #   --group_size  32 (default) | 128
+                                #   --residual    32 (default) | 0
+                                #   --k_bits / --v_bits  (default 2)
+                                #   --batch_size         (default 16)
 
-run_gpqa_kivi.py                # GPQA Diamond — KIVI default
-run_gpqa_fp16.py                # GPQA Diamond — FP16 baseline
-run_gpqa_pertoken.py            # GPQA Diamond — PerToken, group=32, residual=32
-run_gpqa_pertoken_noresidual.py # GPQA Diamond — PerToken, group=32, residual=0
-run_gpqa_pertoken_flat.py       # GPQA Diamond — PerToken, group=128, residual=32
-run_gpqa_pertoken_flat_noresidual.py  # GPQA Diamond — PerToken, group=128, residual=0
-
+run_all.sh                      # Launches all 12 experiments across 4 GPUs via tmux
 generate_report.py              # Reads all logs/JSON and prints results table
 wait_and_report.sh              # Polls for completion, auto-runs generate_report.py
 ```
@@ -145,72 +140,65 @@ wait_and_report.sh              # Polls for completion, auto-runs generate_repor
 
 ### Single experiment
 
+`run_eval.py` is the unified entry point for all 12 experiment configurations:
+
 ```bash
 conda activate kivi
 cd KIVI
 
 # FP16 baseline
-CUDA_VISIBLE_DEVICES=0 python run_gsm8k_fp16.py
+CUDA_VISIBLE_DEVICES=0 python run_eval.py --model fp16     --task gsm8k
+CUDA_VISIBLE_DEVICES=0 python run_eval.py --model fp16     --task gpqa
 
 # KIVI default (per-channel keys)
-CUDA_VISIBLE_DEVICES=0 python run_gsm8k.py
+CUDA_VISIBLE_DEVICES=0 python run_eval.py --model kivi     --task gsm8k
+CUDA_VISIBLE_DEVICES=0 python run_eval.py --model kivi     --task gpqa
 
-# Per-token keys, group=32, with residual buffer
-CUDA_VISIBLE_DEVICES=0 python run_gsm8k_pertoken.py
+# Per-token keys, group=32, residual=32
+CUDA_VISIBLE_DEVICES=0 python run_eval.py --model pertoken --task gsm8k --group_size 32  --residual 32
+CUDA_VISIBLE_DEVICES=0 python run_eval.py --model pertoken --task gpqa  --group_size 32  --residual 32
 
-# Per-token keys, group=32, no residual buffer
-CUDA_VISIBLE_DEVICES=0 python run_gsm8k_pertoken_noresidual.py
+# Per-token keys, group=32, no residual
+CUDA_VISIBLE_DEVICES=0 python run_eval.py --model pertoken --task gsm8k --group_size 32  --residual 0
+CUDA_VISIBLE_DEVICES=0 python run_eval.py --model pertoken --task gpqa  --group_size 32  --residual 0
 
-# Per-token keys, flat (group=128), with residual
-CUDA_VISIBLE_DEVICES=0 python run_gsm8k_pertoken_flat.py
+# Per-token keys, flat (group=128), residual=32
+CUDA_VISIBLE_DEVICES=0 python run_eval.py --model pertoken --task gsm8k --group_size 128 --residual 32
+CUDA_VISIBLE_DEVICES=0 python run_eval.py --model pertoken --task gpqa  --group_size 128 --residual 32
 
 # Per-token keys, flat (group=128), no residual
-CUDA_VISIBLE_DEVICES=0 python run_gsm8k_pertoken_flat_noresidual.py
+CUDA_VISIBLE_DEVICES=0 python run_eval.py --model pertoken --task gsm8k --group_size 128 --residual 0
+CUDA_VISIBLE_DEVICES=0 python run_eval.py --model pertoken --task gpqa  --group_size 128 --residual 0
 ```
-
-Replace `run_gsm8k_*.py` with `run_gpqa_*.py` for GPQA Diamond Generative evaluations.
 
 Results are saved to `logs/<experiment>_results.json`.
 
-### Parallel runs across multiple GPUs (recommended)
+### All experiments in parallel (recommended)
 
-Use tmux to keep experiments alive independent of your SSH/VSCode session:
+`run_all.sh` distributes all 12 experiments across 4 GPUs using tmux, so they survive SSH/VSCode disconnects:
 
 ```bash
-# GPU 0: FP16 baseline
-tmux new-session -d -s gpu0
-tmux send-keys -t gpu0 "cd KIVI && CUDA_VISIBLE_DEVICES=0 python run_gsm8k_fp16.py 2>&1 | tee logs/gsm8k_fp16.log && CUDA_VISIBLE_DEVICES=0 python run_gpqa_fp16.py 2>&1 | tee logs/gpqa_fp16.log" Enter
-
-# GPU 1: PerToken flat, residual=32
-tmux new-session -d -s gpu1
-tmux send-keys -t gpu1 "cd KIVI && CUDA_VISIBLE_DEVICES=1 python run_gsm8k_pertoken_flat.py 2>&1 | tee logs/gsm8k_pertoken_flat.log && CUDA_VISIBLE_DEVICES=1 python run_gpqa_pertoken_flat.py 2>&1 | tee logs/gpqa_pertoken_flat.log" Enter
-
-# GPU 2: PerToken flat, residual=0
-tmux new-session -d -s gpu2
-tmux send-keys -t gpu2 "cd KIVI && CUDA_VISIBLE_DEVICES=2 python run_gsm8k_pertoken_flat_noresidual.py 2>&1 | tee logs/gsm8k_pertoken_flat_noresidual.log && CUDA_VISIBLE_DEVICES=2 python run_gpqa_pertoken_flat_noresidual.py 2>&1 | tee logs/gpqa_pertoken_flat_noresidual.log" Enter
-
-# GPU 3: reruns of KIVI default + PerToken variants (6 experiments chained)
-tmux new-session -d -s gpu3
-tmux send-keys -t gpu3 "cd KIVI && \
-  CUDA_VISIBLE_DEVICES=3 python run_gsm8k.py 2>&1 | tee logs/gsm8k_kivi.log && \
-  CUDA_VISIBLE_DEVICES=3 python run_gpqa_kivi.py 2>&1 | tee logs/gpqa_kivi.log && \
-  CUDA_VISIBLE_DEVICES=3 python run_gsm8k_pertoken.py 2>&1 | tee logs/gsm8k_pertoken.log && \
-  CUDA_VISIBLE_DEVICES=3 python run_gpqa_pertoken.py 2>&1 | tee logs/gpqa_pertoken.log && \
-  CUDA_VISIBLE_DEVICES=3 python run_gsm8k_pertoken_noresidual.py 2>&1 | tee logs/gsm8k_pertoken_noresidual.log && \
-  CUDA_VISIBLE_DEVICES=3 python run_gpqa_pertoken_noresidual.py 2>&1 | tee logs/gpqa_pertoken_noresidual.log" Enter
-
-# Watch for completion and auto-generate report
-tmux new-session -d -s report
-tmux send-keys -t report "cd KIVI && bash wait_and_report.sh" Enter
+conda activate kivi
+cd KIVI
+bash run_all.sh
 ```
 
-To check progress:
+GPU assignment inside `run_all.sh`:
+
+| Session | GPU | Experiments |
+|---------|-----|-------------|
+| gpu0 | 0 | FP16 baseline (GSM8K + GPQA) |
+| gpu1 | 1 | PerToken flat/group=128, residual=32 and 0 (GSM8K + GPQA each) |
+| gpu2 | 2 | PerToken group=32, residual=0 (GSM8K + GPQA) |
+| gpu3 | 3 | KIVI default + PerToken group=32, residual=32 (GSM8K + GPQA each) |
+
+Check progress:
 ```bash
-tmux attach -t gpu0     # Ctrl+B, D to detach without stopping
+tmux attach -t gpu0          # Ctrl+B, D to detach without stopping
 tail -f logs/gsm8k_fp16.log
 ```
 
-### Auto-generate report when all done
+### Generate report when all done
 
 ```bash
 python generate_report.py
@@ -232,7 +220,7 @@ All config is set inline at the top of each run script. Key parameters:
 | `use_flash` | FlashAttention 2 (requires Ampere GPU) | False |
 | `batch_size` | lm-eval batch size | 16 (32GB V100) |
 
-To add a new variant, simply copy any run script and change these values.
+To add a new variant, pass the desired values to `run_eval.py`.
 
 ---
 
