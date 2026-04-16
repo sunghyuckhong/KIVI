@@ -28,10 +28,16 @@ from transformers import AutoTokenizer
 from lm_eval.models.huggingface import HFLM
 from lm_eval import simple_evaluate, utils
 
-MODEL_PATH = "mistralai/Mistral-7B-Instruct-v0.2"
+DEFAULT_MODEL_PATH = "mistralai/Mistral-7B-Instruct-v0.2"
 
 TASK_CFG = {
     "gsm8k": dict(tasks=["gsm8k"], num_fewshot=5),
+    "gsm8k_zeroshot": dict(tasks=["gsm8k"], num_fewshot=0),
+    "gsm8k_cot_zeroshot": dict(tasks=["gsm8k_cot_zeroshot"]),
+    "gsm8k_cot": dict(tasks=["gsm8k_cot"]),
+    "coqa":  dict(tasks=["coqa"], num_fewshot=0),
+    "truthfulqa_mc1": dict(tasks=["truthfulqa_mc1"], num_fewshot=0),
+    "truthfulqa_gen": dict(tasks=["truthfulqa_gen"], num_fewshot=0),
     "gpqa":  dict(tasks=["gpqa_diamond_cot_n_shot"]),
 }
 
@@ -39,26 +45,30 @@ TASK_CFG = {
 def parse_args():
     p = argparse.ArgumentParser(description="KIVI KV-cache quantization evaluation")
     p.add_argument("--model",      choices=["fp16", "kivi", "pertoken"], required=True)
-    p.add_argument("--task",       choices=["gsm8k", "gpqa"], required=True)
+    p.add_argument("--task",       choices=["gsm8k", "gsm8k_zeroshot", "gsm8k_cot", "gsm8k_cot_zeroshot", "coqa", "truthfulqa_mc1", "truthfulqa_gen", "gpqa"], required=True)
     p.add_argument("--group_size", type=int, default=32,
                    help="Quantization group size along head_dim (32 or 128)")
     p.add_argument("--residual",   type=int, default=32,
                    help="FP16 residual buffer length (0 = no buffer)")
     p.add_argument("--k_bits",     type=int, default=2)
     p.add_argument("--v_bits",     type=int, default=2)
+    p.add_argument("--model_path", type=str, default=DEFAULT_MODEL_PATH,
+                   help="HuggingFace model path (default: Mistral-7B-Instruct-v0.2)")
     p.add_argument("--batch_size", type=int, default=16)
     return p.parse_args()
 
 
-def output_name(args):
-    """Derive a canonical output filename from args.
+def model_short_name(model_path):
+    """Extract a short name from the HF model path for filenames."""
+    return model_path.rstrip("/").split("/")[-1].lower()
 
-    Backward-compatible: 2-bit + residual=32 produces the same names as before.
-    New configs encode bits (_intN when N≠2) and residual (_resN when N≠32, _noresidual when N=0).
-    """
+
+def output_name(args):
+    """Derive a canonical output filename from args."""
     t = args.task
+    m = model_short_name(args.model_path)
     if args.model == "fp16":
-        return f"{t}_fp16"
+        return f"{t}_{m}_fp16"
 
     bits_tag = f"_int{args.k_bits}" if args.k_bits != 2 else ""
 
@@ -70,43 +80,60 @@ def output_name(args):
         res_tag = ""
 
     if args.model == "kivi":
-        return f"{t}_kivi{bits_tag}{res_tag}"
+        return f"{t}_{m}_kivi{bits_tag}{res_tag}"
     else:  # pertoken
         flat = "_flat" if args.group_size == 128 else ""
-        return f"{t}_pertoken{bits_tag}{flat}{res_tag}"
+        return f"{t}_{m}_pertoken{bits_tag}{flat}{res_tag}"
+
+
+def is_llama(model_path):
+    return "llama" in model_path.lower()
 
 
 def load_model(args):
+    mp = args.model_path
+
     if args.model == "fp16":
         from transformers import AutoModelForCausalLM
-        print(f"Loading FP16 {MODEL_PATH} (no quantization)...")
+        print(f"Loading FP16 {mp} (no quantization, flash_attention_2)...")
         return AutoModelForCausalLM.from_pretrained(
-            MODEL_PATH, torch_dtype=torch.float16, low_cpu_mem_usage=True
+            mp, torch_dtype=torch.float16, low_cpu_mem_usage=True,
+            attn_implementation="flash_attention_2",
         ).cuda()
 
-    from transformers import MistralConfig
-    config = MistralConfig.from_pretrained(MODEL_PATH)
+    from transformers import AutoConfig
+    config = AutoConfig.from_pretrained(mp)
     config.k_bits         = args.k_bits
     config.v_bits         = args.v_bits
     config.group_size     = args.group_size
     config.residual_length = args.residual
-    config.use_flash      = False  # V100 (sm_70) does not support FlashAttention 2
+    config.use_flash      = True
 
-    if args.model == "kivi":
-        from models.mistral_kivi import MistralForCausalLM_KIVI
-        print(f"Loading KIVI {MODEL_PATH} (k_bits={args.k_bits}, v_bits={args.v_bits}, "
-              f"group={args.group_size}, residual={args.residual})...")
-        return MistralForCausalLM_KIVI.from_pretrained(
-            MODEL_PATH, config=config, low_cpu_mem_usage=True, torch_dtype=torch.float16
-        ).cuda()
-
-    # pertoken
-    from models.mistral_kivi_pertoken import MistralForCausalLM_KIVI_PerToken
-    print(f"Loading KIVI-PerToken {MODEL_PATH} (k_bits={args.k_bits}, v_bits={args.v_bits}, "
-          f"group={args.group_size}, residual={args.residual})...")
-    return MistralForCausalLM_KIVI_PerToken.from_pretrained(
-        MODEL_PATH, config=config, low_cpu_mem_usage=True, torch_dtype=torch.float16
-    ).cuda()
+    if is_llama(mp):
+        if args.model == "kivi":
+            from models.llama_kivi import LlamaForCausalLM_KIVI
+            print(f"Loading KIVI {mp} (k_bits={args.k_bits}, v_bits={args.v_bits}, "
+                  f"group={args.group_size}, residual={args.residual})...")
+            return LlamaForCausalLM_KIVI.from_pretrained(
+                mp, config=config, low_cpu_mem_usage=True, torch_dtype=torch.float16
+            ).cuda()
+        else:
+            raise ValueError(f"pertoken not implemented for Llama models")
+    else:
+        if args.model == "kivi":
+            from models.mistral_kivi import MistralForCausalLM_KIVI
+            print(f"Loading KIVI {mp} (k_bits={args.k_bits}, v_bits={args.v_bits}, "
+                  f"group={args.group_size}, residual={args.residual})...")
+            return MistralForCausalLM_KIVI.from_pretrained(
+                mp, config=config, low_cpu_mem_usage=True, torch_dtype=torch.float16
+            ).cuda()
+        else:  # pertoken
+            from models.mistral_kivi_pertoken import MistralForCausalLM_KIVI_PerToken
+            print(f"Loading KIVI-PerToken {mp} (k_bits={args.k_bits}, v_bits={args.v_bits}, "
+                  f"group={args.group_size}, residual={args.residual})...")
+            return MistralForCausalLM_KIVI_PerToken.from_pretrained(
+                mp, config=config, low_cpu_mem_usage=True, torch_dtype=torch.float16
+            ).cuda()
 
 
 def main():
@@ -116,15 +143,18 @@ def main():
     out_path = f"logs/{name}_results.json"
 
     print(f"\n{'='*60}")
-    print(f"  model={args.model}  task={args.task}  "
-          f"group_size={args.group_size}  residual={args.residual}")
+    if args.model == "fp16":
+        print(f"  model={args.model}  task={args.task}  path={args.model_path}")
+    else:
+        print(f"  model={args.model}  task={args.task}  path={args.model_path}  "
+              f"group_size={args.group_size}  residual={args.residual}")
     print(f"  output → {out_path}")
     print(f"{'='*60}\n")
 
     model = load_model(args)
     model.eval()
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, use_fast=False)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_path, use_fast=False)
     lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=args.batch_size)
 
     results = simple_evaluate(
