@@ -26,15 +26,9 @@ if __name__ == '__main__':
 
     model_args, data_args, training_args = process_args()
     dtype = torch.float16
-    if 'llama' in model_args.model_name_or_path.lower():
-        config = LlamaConfig.from_pretrained(model_args.model_name_or_path)
-        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, 
-                                            use_fast=False, 
-                                            trust_remote_code=True, 
-                                            tokenizer_type='llama',
-                                            model_max_length=training_args.model_max_length)
-    else:
-        raise NotImplementedError
+    model_path = model_args.model_name_or_path.lower()
+    is_llama = 'llama' in model_path
+    is_mistral = 'mistral' in model_path
 
     if torch.cuda.device_count() > 1:
         parallel = True
@@ -42,7 +36,8 @@ if __name__ == '__main__':
     else:
         parallel = False
         low_cpu_mem_usage=True
-    if 'llama' in model_args.model_name_or_path.lower():
+
+    if is_llama:
         if model_args.k_bits == 16 and model_args.v_bits == 16:
             from models_paper.modeling_llama import LMEvalLlamaForCausalLM
             model = LMEvalLlamaForCausalLM(
@@ -53,12 +48,12 @@ if __name__ == '__main__':
                 pretrained=model_args.model_name_or_path,
                 cache_dir=training_args.cache_dir,
                 dtype=dtype,
+                batch_size=data_args.batch_size,
                 low_cpu_mem_usage=low_cpu_mem_usage,
             )
         else:
             assert model_args.k_bits in [2, 4] and model_args.v_bits in [2, 4]
             from models_paper.llama_kivi import LMEvalLlamaForCausalLM_KIVI
-
             model = LMEvalLlamaForCausalLM_KIVI(
                 k_bits=model_args.k_bits,
                 v_bits=model_args.v_bits,
@@ -67,10 +62,41 @@ if __name__ == '__main__':
                 pretrained=model_args.model_name_or_path,
                 cache_dir=training_args.cache_dir,
                 dtype=dtype,
+                batch_size=data_args.batch_size,
                 low_cpu_mem_usage=low_cpu_mem_usage,
             )
+    elif is_mistral:
+        if model_args.k_bits == 16 and model_args.v_bits == 16:
+            from models_paper.modeling_mistral import LMEvalMistralForCausalLM
+            model = LMEvalMistralForCausalLM(
+                k_bits=model_args.k_bits,
+                v_bits=model_args.v_bits,
+                group_size=model_args.group_size,
+                residual_length=model_args.residual_length,
+                pretrained=model_args.model_name_or_path,
+                cache_dir=training_args.cache_dir,
+                dtype=dtype,
+                batch_size=data_args.batch_size,
+                low_cpu_mem_usage=low_cpu_mem_usage,
+                use_fast_tokenizer=False,
+            )
+        else:
+            assert model_args.k_bits in [2, 4] and model_args.v_bits in [2, 4]
+            from models_paper.mistral_kivi import LMEvalMistralForCausalLM_KIVI
+            model = LMEvalMistralForCausalLM_KIVI(
+                k_bits=model_args.k_bits,
+                v_bits=model_args.v_bits,
+                group_size=model_args.group_size,
+                residual_length=model_args.residual_length,
+                pretrained=model_args.model_name_or_path,
+                cache_dir=training_args.cache_dir,
+                dtype=dtype,
+                batch_size=data_args.batch_size,
+                low_cpu_mem_usage=low_cpu_mem_usage,
+                use_fast_tokenizer=False,
+            )
     else:
-        raise NotImplementedError
+        raise NotImplementedError(f"Model {model_args.model_name_or_path} not supported. Use Llama or Mistral.")
     # model = model.eval().cuda()
 
     if data_args.tasks is not None:
