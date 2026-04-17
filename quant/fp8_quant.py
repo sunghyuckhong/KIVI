@@ -34,12 +34,14 @@ def quantize_fp8(
     # Reshape to expose groups: (B, nh, T, num_groups, group_size)
     data_grouped = data.view(B, nh, T, num_groups, group_size)
 
-    # Compute per-group scale: max(|x|) / FP8_MAX
-    amax = data_grouped.abs().amax(dim=-1)  # (B, nh, T, num_groups)
-    scale = (amax / _FP8_MAX).clamp(min=1e-12)  # avoid div by zero
+    # Compute per-group scale in fp32: max(|x|) / FP8_MAX.
+    # Floor at 1e-4 (not 1e-12): with fp16 activations, a scale below ~1e-5
+    # underflows the reciprocal and produces inf/NaN after the division.
+    amax = data_grouped.abs().amax(dim=-1).to(torch.float32)  # (B, nh, T, num_groups)
+    scale = (amax / _FP8_MAX).clamp(min=1e-4)
 
-    # Scale and cast to FP8, then store as uint8 for cat compatibility
-    data_scaled = data_grouped / scale.unsqueeze(-1)
+    # Scale in fp32, then cast to FP8; store as uint8 for cat compatibility
+    data_scaled = data_grouped.to(torch.float32) / scale.unsqueeze(-1)
     data_fp8 = data_scaled.to(_FP8_DTYPE).view(B, nh, T, D)
     data_uint8 = data_fp8.view(torch.uint8)
 
@@ -68,4 +70,6 @@ def dequantize_fp8(
     # Expand scale from (B, nh, T, num_groups) -> (B, nh, T, D)
     scale_expanded = scale.unsqueeze(-1).expand(B, nh, T, num_groups, group_size).reshape(B, nh, T, D)
 
-    return data_fp8.to(torch.float16) * scale_expanded
+    out = data_fp8.to(torch.float16) * scale_expanded
+    # FP8 e4m3fn can carry NaN; guard downstream attention math.
+    return torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
