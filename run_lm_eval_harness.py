@@ -128,7 +128,10 @@ if __name__ == '__main__':
         # Save results
         os.makedirs("logs", exist_ok=True)
         model_short = model_args.model_name_or_path.rstrip("/").split("/")[-1].lower()
-        bits_tag = f"_kivi{model_args.k_bits}bit_res{model_args.residual_length}"
+        if model_args.k_bits == 16:
+            bits_tag = "_fp16"
+        else:
+            bits_tag = f"_kivi{model_args.k_bits}bit_g{model_args.group_size}_res{model_args.residual_length}"
         out_name = f"{'_'.join(tasks_list)}_{model_short}{bits_tag}_paper_results.json"
         out_path = os.path.join("logs", out_name)
         with open(out_path, "w") as f:

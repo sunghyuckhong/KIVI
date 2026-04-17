@@ -119,7 +119,12 @@ def load_model(args):
 
     if args.model == "fp8":
         config.use_flash = False
-        # Add Mistral-specific attribute for Llama configs (FP8 model uses Mistral base)
+        if is_llama(mp):
+            from models.llama_kivi_fp8 import LlamaForCausalLM_FP8
+            print(f"Loading FP8 Llama {mp} (group={args.group_size})...")
+            return LlamaForCausalLM_FP8.from_pretrained(
+                mp, config=config, low_cpu_mem_usage=True, torch_dtype=torch.float16
+            ).cuda()
         if not hasattr(config, "sliding_window") or config.sliding_window is None:
             config.sliding_window = config.max_position_embeddings
         from models.mistral_kivi_fp8 import MistralForCausalLM_FP8
@@ -131,6 +136,14 @@ def load_model(args):
     if args.model == "smoothkv":
         assert args.calib_path is not None, "--calib_path required for smoothkv"
         config.use_flash = False
+        if is_llama(mp):
+            from models.llama_smoothkv import LlamaForCausalLM_SmoothKV
+            print(f"Loading SmoothKV Llama {mp} (calib={args.calib_path}, "
+                  f"group={args.group_size})...")
+            return LlamaForCausalLM_SmoothKV.from_pretrained_with_calib(
+                mp, args.calib_path, config=config,
+                low_cpu_mem_usage=True, torch_dtype=torch.float16
+            ).cuda()
         if not hasattr(config, "sliding_window") or config.sliding_window is None:
             config.sliding_window = config.max_position_embeddings
         from models.mistral_smoothkv import MistralForCausalLM_SmoothKV
@@ -142,8 +155,14 @@ def load_model(args):
         ).cuda()
 
     if args.model == "pertoken":
-        # Use Mistral pertoken code for both Llama and Mistral (with sliding_window patch for Llama)
         config.use_flash = False
+        if is_llama(mp):
+            from models.llama_kivi_pertoken import LlamaForCausalLM_KIVI_PerToken
+            print(f"Loading pertoken Llama {mp} (k_bits={args.k_bits}, v_bits={args.v_bits}, "
+                  f"group={args.group_size}, residual={args.residual})...")
+            return LlamaForCausalLM_KIVI_PerToken.from_pretrained(
+                mp, config=config, low_cpu_mem_usage=True, torch_dtype=torch.float16
+            ).cuda()
         if not hasattr(config, "sliding_window") or config.sliding_window is None:
             config.sliding_window = config.max_position_embeddings
         from models.mistral_kivi_pertoken import MistralForCausalLM_KIVI_PerToken

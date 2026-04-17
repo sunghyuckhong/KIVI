@@ -418,8 +418,8 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
                 key_states = key_states.to(target_dtype)
                 value_states = value_states.to(target_dtype)
             attn_output = self._flash_attention_forward(
-                query_states.transpose(1, 2), key_states.transpose(1, 2), 
-                value_states.transpose(1, 2), None, q_len, dropout=0.0
+                query_states.transpose(1, 2), key_states.transpose(1, 2),
+                value_states.transpose(1, 2), attention_mask, q_len, dropout=0.0
             )
             # quantize
             if key_states.shape[-2] % self.residual_length != 0:
