@@ -44,7 +44,9 @@ TASK_CFG = {
 
 def parse_args():
     p = argparse.ArgumentParser(description="KIVI KV-cache quantization evaluation")
-    p.add_argument("--model",      choices=["fp16", "kivi", "pertoken"], required=True)
+    p.add_argument("--model",      choices=["fp16", "kivi", "pertoken", "fp8", "smoothkv"], required=True)
+    p.add_argument("--calib_path", type=str, default=None,
+                   help="Path to SmoothKV calibration .pt file (required when --model=smoothkv)")
     p.add_argument("--task",       choices=["gsm8k", "gsm8k_zeroshot", "gsm8k_cot", "gsm8k_cot_zeroshot", "coqa", "truthfulqa_mc1", "truthfulqa_gen", "gpqa"], required=True)
     p.add_argument("--group_size", type=int, default=32,
                    help="Quantization group size along head_dim (32 or 128)")
@@ -79,8 +81,14 @@ def output_name(args):
     else:
         res_tag = ""
 
+    grp_tag = f"_g{args.group_size}" if args.group_size != 32 else ""
+
     if args.model == "kivi":
-        return f"{t}_{m}_kivi{bits_tag}{res_tag}"
+        return f"{t}_{m}_kivi{bits_tag}{grp_tag}{res_tag}"
+    elif args.model == "fp8":
+        return f"{t}_{m}_fp8{grp_tag}{res_tag}"
+    elif args.model == "smoothkv":
+        return f"{t}_{m}_smoothkv{grp_tag}"
     else:  # pertoken
         flat = "_flat" if args.group_size == 128 else ""
         return f"{t}_{m}_pertoken{bits_tag}{flat}{res_tag}"
@@ -109,6 +117,42 @@ def load_model(args):
     config.residual_length = args.residual
     config.use_flash      = True
 
+    if args.model == "fp8":
+        config.use_flash = False
+        # Add Mistral-specific attribute for Llama configs (FP8 model uses Mistral base)
+        if not hasattr(config, "sliding_window") or config.sliding_window is None:
+            config.sliding_window = config.max_position_embeddings
+        from models.mistral_kivi_fp8 import MistralForCausalLM_FP8
+        print(f"Loading FP8 {mp} (group={args.group_size})...")
+        return MistralForCausalLM_FP8.from_pretrained(
+            mp, config=config, low_cpu_mem_usage=True, torch_dtype=torch.float16
+        ).cuda()
+
+    if args.model == "smoothkv":
+        assert args.calib_path is not None, "--calib_path required for smoothkv"
+        config.use_flash = False
+        if not hasattr(config, "sliding_window") or config.sliding_window is None:
+            config.sliding_window = config.max_position_embeddings
+        from models.mistral_smoothkv import MistralForCausalLM_SmoothKV
+        print(f"Loading SmoothKV {mp} (calib={args.calib_path}, "
+              f"group={args.group_size})...")
+        return MistralForCausalLM_SmoothKV.from_pretrained_with_calib(
+            mp, args.calib_path, config=config,
+            low_cpu_mem_usage=True, torch_dtype=torch.float16
+        ).cuda()
+
+    if args.model == "pertoken":
+        # Use Mistral pertoken code for both Llama and Mistral (with sliding_window patch for Llama)
+        config.use_flash = False
+        if not hasattr(config, "sliding_window") or config.sliding_window is None:
+            config.sliding_window = config.max_position_embeddings
+        from models.mistral_kivi_pertoken import MistralForCausalLM_KIVI_PerToken
+        print(f"Loading pertoken {mp} (k_bits={args.k_bits}, v_bits={args.v_bits}, "
+              f"group={args.group_size}, residual={args.residual})...")
+        return MistralForCausalLM_KIVI_PerToken.from_pretrained(
+            mp, config=config, low_cpu_mem_usage=True, torch_dtype=torch.float16
+        ).cuda()
+
     if is_llama(mp):
         if args.model == "kivi":
             from models.llama_kivi import LlamaForCausalLM_KIVI
@@ -117,23 +161,14 @@ def load_model(args):
             return LlamaForCausalLM_KIVI.from_pretrained(
                 mp, config=config, low_cpu_mem_usage=True, torch_dtype=torch.float16
             ).cuda()
-        else:
-            raise ValueError(f"pertoken not implemented for Llama models")
     else:
-        if args.model == "kivi":
-            from models.mistral_kivi import MistralForCausalLM_KIVI
-            print(f"Loading KIVI {mp} (k_bits={args.k_bits}, v_bits={args.v_bits}, "
-                  f"group={args.group_size}, residual={args.residual})...")
-            return MistralForCausalLM_KIVI.from_pretrained(
-                mp, config=config, low_cpu_mem_usage=True, torch_dtype=torch.float16
-            ).cuda()
-        else:  # pertoken
-            from models.mistral_kivi_pertoken import MistralForCausalLM_KIVI_PerToken
-            print(f"Loading KIVI-PerToken {mp} (k_bits={args.k_bits}, v_bits={args.v_bits}, "
-                  f"group={args.group_size}, residual={args.residual})...")
-            return MistralForCausalLM_KIVI_PerToken.from_pretrained(
-                mp, config=config, low_cpu_mem_usage=True, torch_dtype=torch.float16
-            ).cuda()
+        # Mistral KIVI
+        from models.mistral_kivi import MistralForCausalLM_KIVI
+        print(f"Loading KIVI {mp} (k_bits={args.k_bits}, v_bits={args.v_bits}, "
+              f"group={args.group_size}, residual={args.residual})...")
+        return MistralForCausalLM_KIVI.from_pretrained(
+            mp, config=config, low_cpu_mem_usage=True, torch_dtype=torch.float16
+        ).cuda()
 
 
 def main():
