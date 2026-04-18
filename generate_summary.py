@@ -70,23 +70,15 @@ def paper_file(model_short, k, g=None, r=None):
     return f"{{task}}_{model_short}_kivi{k}bit_g{g}_res{r}_paper_results.json"
 
 
-def modern_file(model_short, method, g=None, bits=None, res=None):
-    """Build modern-env filename (run_eval.py)."""
+def paper_method_file(model_short, method, g=None, bits=None, res=None):
+    """Build paper-env filename for the fp8 / pertoken / smoothkv ports
+    (see the `_method_tag` helper in run_lm_eval_harness.py)."""
     if method == "fp8":
-        suffix = f"fp8" + (f"_g{g}" if g and g != 32 else "")
-        if res is not None and res == 0:
-            suffix += "_noresidual"
-        elif res is not None and res != 32:
-            suffix += f"_res{res}"
-        return f"{{task}}_{model_short}_{suffix}_results.json"
-    if method == "smoothkv":
-        suffix = f"smoothkv" + (f"_g{g}" if g and g != 32 else "")
-        return f"{{task}}_{model_short}_{suffix}_results.json"
+        return f"{{task}}_{model_short}_fp8paper_g{g}_paper_results.json"
     if method == "pertoken":
-        bits_tag = f"_int{bits}" if bits and bits != 2 else ""
-        flat = "_flat" if g == 128 else ""
-        res_tag = "_noresidual" if res == 0 else ("" if res == 32 else f"_res{res}")
-        return f"{{task}}_{model_short}_pertoken{bits_tag}{flat}{res_tag}_results.json"
+        return f"{{task}}_{model_short}_pertokenpaper_int{bits}_g{g}_res{res}_paper_results.json"
+    if method == "smoothkv":
+        return f"{{task}}_{model_short}_smoothkvpaper_g{g}_paper_results.json"
     return None
 
 
@@ -151,15 +143,15 @@ def collect_rows():
                         paper_file(short, 4, 128, 128), env="paper"))
         rows.append(row(model, "KIVI-4 (g=32,r=32)",
                         paper_file(short, 4, 32, 32), env="paper"))
-        # Naive INT4 per-token (modern env)
+        # Naive INT4 per-token — paper env
         rows.append(row(model, "Naive INT4 per-token (g=128,r=0)",
-                        modern_file(short, "pertoken", g=128, bits=4, res=0), env="modern"))
-        # DeepSeekFP8 (modern env)
+                        paper_method_file(short, "pertoken", g=128, bits=4, res=0), env="paper"))
+        # DeepSeekFP8 — paper env
         rows.append(row(model, "DeepSeekFP8 per-token (g=128)",
-                        modern_file(short, "fp8", g=128, res=0), env="modern"))
-        # SmoothKV (modern env)
+                        paper_method_file(short, "fp8", g=128), env="paper"))
+        # SmoothKV — paper env
         rows.append(row(model, "SmoothKV (ours, INT4, g=128)",
-                        modern_file(short, "smoothkv", g=128), env="modern"))
+                        paper_method_file(short, "smoothkv", g=128), env="paper"))
 
     return rows
 
@@ -254,8 +246,7 @@ def build_html():
   <strong>SmoothKV (ours)</strong>: calibrated channel smoothing (diagonal s<sub>K</sub> post-RoPE, s<sub>V</sub>) + per-token INT4, group_size = 128, no residual, no µ shifts, no rotation. Tier-1 default.<br>
   <br>
   <strong>Hardware:</strong> NVIDIA A100-SXM4-80GB.<br>
-  <strong>Paper env:</strong> torch 2.1.2, transformers 4.36.2, lm-eval c9bbec6e, bs=1 (matches paper exactly).<br>
-  <strong>Modern env:</strong> torch 2.1.0, transformers 4.43.1, lm-eval 0.4.2, bs=16. Deviates from paper by &lt;1-2pp due to library differences.<br>
+  <strong>Env:</strong> all rows run in paper env — torch 2.1.0, transformers 4.36.2, lm-eval commit c9bbec6e, bs=1.<br>
   <strong>SmoothKV calibration:</strong> 128 samples × 2048 tokens from <code>neuralmagic/LLM_compression_calibration</code>, α = β = 0.5.<br>
   Seeds: random=0, numpy=1234, torch=1234.
 </div>
