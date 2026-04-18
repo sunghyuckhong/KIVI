@@ -41,6 +41,15 @@ class ModelArguments:
         default=128,
         metadata={"help": "KV_cache residual length."},
     )
+    method: Optional[str] = field(
+        default="kivi",
+        metadata={"help": "KV-cache quantization method: kivi | fp8 | pertoken | smoothkv. "
+                          "Ignored when k_bits=16 (FP16 path)."},
+    )
+    calib_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to SmoothKV calibration .pt file (required when method=smoothkv)."},
+    )
     output_model_filename: Optional[str] = field(
         default="test-output", metadata={"help": "Output model relative manifold path"}
     )
