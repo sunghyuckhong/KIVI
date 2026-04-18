@@ -266,10 +266,18 @@ def build_html():
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--output", default="summary.html")
+    ap.add_argument("--output", default=None,
+                    help="Output filename. Defaults to summary_YYYYMMDD-HHMM.html (no overwrite).")
     ap.add_argument("--paper-env", action="store_true", help="Ignored — present for orchestrator compat")
+    ap.add_argument("--latest-alias", default="summary_latest.html",
+                    help="Also write a 'latest' copy to this path (pass empty string to disable).")
     args = ap.parse_args()
     html = build_html()
-    with open(args.output, "w") as f:
+    out = args.output or datetime.now().strftime("summary_%Y%m%d-%H%M.html")
+    with open(out, "w") as f:
         f.write(html)
-    print(f"Written to {args.output}")
+    print(f"Written to {out}")
+    if args.latest_alias:
+        with open(args.latest_alias, "w") as f:
+            f.write(html)
+        print(f"Latest alias at {args.latest_alias}")
