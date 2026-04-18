@@ -68,11 +68,13 @@ if __name__ == '__main__':
     elif is_mistral:
         if model_args.k_bits == 16 and model_args.v_bits == 16:
             from models_paper.modeling_mistral import LMEvalMistralForCausalLM
+            # LMEvalMistralForCausalLM takes `buffer_length`, not `residual_length`
+            # (inconsistency in the vendored paper code).
             model = LMEvalMistralForCausalLM(
                 k_bits=model_args.k_bits,
                 v_bits=model_args.v_bits,
                 group_size=model_args.group_size,
-                residual_length=model_args.residual_length,
+                buffer_length=model_args.residual_length,
                 pretrained=model_args.model_name_or_path,
                 cache_dir=training_args.cache_dir,
                 dtype=dtype,
