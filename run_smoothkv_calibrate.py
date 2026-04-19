@@ -43,38 +43,92 @@ def parse_args():
     p.add_argument("--device", type=str, default="cuda:0")
     p.add_argument("--max_batches_before_summary", type=int, default=32,
                    help="Reduce peak GPU mem by flushing per-channel stats periodically")
+    p.add_argument("--samples_per_channel", type=int, default=0,
+                   help="If >0, uniformly subsample this many abs values per "
+                        "(layer, head, channel) for offline percentile calibration. "
+                        "Adds 32*nh*D*R*2B CPU memory; 0 disables (max-only, backward-compat).")
     return p.parse_args()
 
 
 class StatCollector:
-    """Accumulates running max|x| per channel for each (layer, head) over many batches."""
+    """Running max|x| per (layer, head, channel), + optional uniform-random
+    subsample of abs values for offline percentile calibration (Eq 11)."""
 
-    def __init__(self, num_layers, num_kv_heads, num_q_heads, head_dim, device):
+    def __init__(self, num_layers, num_kv_heads, num_q_heads, head_dim, device,
+                 samples_per_channel: int = 0):
         self.num_layers = num_layers
         self.num_kv_heads = num_kv_heads
         self.num_q_heads = num_q_heads
         self.head_dim = head_dim
         self.device = device
+        self.R = samples_per_channel
 
-        # max|Q| per (layer, num_q_heads, channel) in fp32
         self.max_q = torch.zeros(num_layers, num_q_heads, head_dim, device=device)
         self.max_k = torch.zeros(num_layers, num_kv_heads, head_dim, device=device)
         self.max_v = torch.zeros(num_layers, num_kv_heads, head_dim, device=device)
 
+        if self.R > 0:
+            # CPU fp16 buffers — kept out of GPU memory. Accessed vectorised
+            # in _update() below. count_* tracks "n values seen so far".
+            self.samples_k = torch.zeros(num_layers, num_kv_heads, head_dim, self.R,
+                                         dtype=torch.float16)
+            self.samples_v = torch.zeros(num_layers, num_kv_heads, head_dim, self.R,
+                                         dtype=torch.float16)
+            self.count_k = torch.zeros(num_layers, num_kv_heads, head_dim, dtype=torch.long)
+            self.count_v = torch.zeros(num_layers, num_kv_heads, head_dim, dtype=torch.long)
+        else:
+            self.samples_k = self.samples_v = None
+            self.count_k  = self.count_v  = None
+
     def update_q(self, layer_idx, q):
-        """q: (B, num_q_heads, T, D) — post-RoPE."""
-        m = q.abs().amax(dim=(0, 2)).to(torch.float32)  # (nh, D)
+        m = q.abs().amax(dim=(0, 2)).to(torch.float32)
         torch.maximum(self.max_q[layer_idx], m, out=self.max_q[layer_idx])
 
+    def _update(self, layer_idx, x, max_buf, sample_buf, count_buf):
+        """Update running max and (optionally) reservoir sample for x: (B,nh,T,D)."""
+        a = x.abs()
+        m = a.amax(dim=(0, 2)).to(torch.float32)  # (nh, D)
+        torch.maximum(max_buf[layer_idx], m, out=max_buf[layer_idx])
+
+        if sample_buf is None:
+            return
+        R = self.R
+        B, nh, T, D = a.shape
+        N = B * T
+
+        # Reshape to (nh, D, N) then move to CPU fp16 once per batch.
+        flat = a.permute(1, 3, 0, 2).reshape(nh, D, N).to(torch.float16).cpu()
+        # Per channel, fill empty slots first then do reservoir replacement.
+        buf = sample_buf[layer_idx]   # (nh, D, R)
+        for h in range(nh):
+            for c in range(D):
+                sb = int(count_buf[layer_idx, h, c].item())  # seen before this batch
+                vals = flat[h, c]      # (N,)
+                if sb < R:
+                    n_fill = min(R - sb, N)
+                    buf[h, c, sb:sb + n_fill] = vals[:n_fill]
+                    rest = vals[n_fill:]
+                    base = sb + n_fill
+                else:
+                    rest = vals
+                    base = sb
+                if rest.numel() > 0:
+                    # reservoir replacement: for the i-th remaining val, probability
+                    # of replacing some slot in the buffer is R / (base + i + 1).
+                    t_range = torch.arange(base + 1, base + rest.numel() + 1,
+                                           dtype=torch.float32)
+                    accept = torch.rand(rest.numel()) < R / t_range
+                    accepted_idx = accept.nonzero(as_tuple=True)[0]
+                    if accepted_idx.numel() > 0:
+                        slots = torch.randint(0, R, (accepted_idx.numel(),))
+                        buf[h, c, slots] = rest[accepted_idx]
+        count_buf[layer_idx] += N
+
     def update_k(self, layer_idx, k):
-        """k: (B, num_kv_heads, T, D) — post-RoPE."""
-        m = k.abs().amax(dim=(0, 2)).to(torch.float32)
-        torch.maximum(self.max_k[layer_idx], m, out=self.max_k[layer_idx])
+        self._update(layer_idx, k, self.max_k, self.samples_k, self.count_k)
 
     def update_v(self, layer_idx, v):
-        """v: (B, num_kv_heads, T, D)."""
-        m = v.abs().amax(dim=(0, 2)).to(torch.float32)
-        torch.maximum(self.max_v[layer_idx], m, out=self.max_v[layer_idx])
+        self._update(layer_idx, v, self.max_v, self.samples_v, self.count_v)
 
 
 def install_hooks(model, collector):
@@ -173,7 +227,10 @@ def main():
     print(f"Model: {num_layers} layers, {num_q_heads} Q heads, "
           f"{num_kv_heads} KV heads, head_dim={head_dim}")
 
-    collector = StatCollector(num_layers, num_kv_heads, num_q_heads, head_dim, device)
+    collector = StatCollector(
+        num_layers, num_kv_heads, num_q_heads, head_dim, device,
+        samples_per_channel=args.samples_per_channel,
+    )
     monkey_patch_rope(model, collector)
     hooks = install_hooks(model, collector)
 
@@ -221,15 +278,13 @@ def main():
 
     # Save
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
-    torch.save({
-        "s_K": s_K.cpu(),  # (L, num_kv_heads, D)
+    payload = {
+        "s_K": s_K.cpu(),
         "s_V": s_V.cpu(),
-        # Raw max statistics — used by make_alpha_variants.py to generate
-        # new s_K/s_V without rerunning the forward pass.
-        "max_q":         collector.max_q.cpu(),          # (L, num_q_heads, D)
-        "max_q_grouped": max_q_grouped.cpu(),            # (L, num_kv_heads, D)
-        "max_k":         collector.max_k.cpu(),          # (L, num_kv_heads, D)
-        "max_v":         collector.max_v.cpu(),          # (L, num_kv_heads, D)
+        "max_q":         collector.max_q.cpu(),
+        "max_q_grouped": max_q_grouped.cpu(),
+        "max_k":         collector.max_k.cpu(),
+        "max_v":         collector.max_v.cpu(),
         "alpha": alpha,
         "beta": beta,
         "model_path": args.model_path,
@@ -238,7 +293,13 @@ def main():
         "num_layers": num_layers,
         "num_kv_heads": num_kv_heads,
         "head_dim": head_dim,
-    }, args.output)
+    }
+    if collector.samples_k is not None:
+        payload["samples_k"] = collector.samples_k       # (L, nh, D, R) fp16 CPU
+        payload["samples_v"] = collector.samples_v
+        payload["count_k"]   = collector.count_k
+        payload["count_v"]   = collector.count_v
+    torch.save(payload, args.output)
     print(f"Saved calibration to {args.output}")
     print(f"  s_K range per layer: min={s_K.min():.4f}, max={s_K.max():.4f}, "
           f"mean={s_K.mean():.4f}")

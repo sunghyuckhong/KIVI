@@ -64,17 +64,19 @@ def _method_tag(args):
     if m == "pertoken":
         return f"_pertokenpaper_int{args.k_bits}_g{args.group_size}_res{args.residual_length}"
     if m == "smoothkv":
-        # Include alpha/beta in the tag when the calib path encodes them, so
-        # sweeping either doesn't collide on the output filename.
+        # Include calibration-parameter tags so α sweep / β sweep / percentile
+        # sweep results don't collide in output filenames.
         tag_extra = ""
         if args.calib_path:
             import re
-            # Match _aD or _aD.D (greedy on digits+optional-decimal), not _a([\d.]+?)
-            # which non-greedy-collapsed "0.25" to just "0".
-            a = re.search(r"_a(\d+(?:\.\d+)?)", args.calib_path)
-            b = re.search(r"_b(\d+(?:\.\d+)?)", args.calib_path)
-            if a: tag_extra += f"_a{a.group(1)}"
-            if b: tag_extra += f"_b{b.group(1)}"
+            a  = re.search(r"_a(\d+(?:\.\d+)?)",      args.calib_path)
+            b  = re.search(r"_b(\d+(?:\.\d+)?)",      args.calib_path)
+            pK = re.search(r"_pK(\d+p?\d*)",          args.calib_path)
+            pV = re.search(r"_pV(\d+p?\d*)",          args.calib_path)
+            if a:  tag_extra += f"_a{a.group(1)}"
+            if b:  tag_extra += f"_b{b.group(1)}"
+            if pK: tag_extra += f"_pK{pK.group(1)}"
+            if pV: tag_extra += f"_pV{pV.group(1)}"
         return f"_smoothkvpaper_g{args.group_size}{tag_extra}"
     return f"_{m}"
 
