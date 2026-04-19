@@ -5,7 +5,7 @@ import json
 import torch
 
 from lm_eval import evaluator, utils
-from lm_eval.tasks import initialize_tasks
+from lm_eval.tasks import initialize_tasks, include_path
 from lm_eval.api.registry import ALL_TASKS
 
 from utils_paper.process_args import process_args
@@ -64,7 +64,18 @@ def _method_tag(args):
     if m == "pertoken":
         return f"_pertokenpaper_int{args.k_bits}_g{args.group_size}_res{args.residual_length}"
     if m == "smoothkv":
-        return f"_smoothkvpaper_g{args.group_size}"
+        # Include alpha/beta in the tag when the calib path encodes them, so
+        # sweeping either doesn't collide on the output filename.
+        tag_extra = ""
+        if args.calib_path:
+            import re
+            # Match _aD or _aD.D (greedy on digits+optional-decimal), not _a([\d.]+?)
+            # which non-greedy-collapsed "0.25" to just "0".
+            a = re.search(r"_a(\d+(?:\.\d+)?)", args.calib_path)
+            b = re.search(r"_b(\d+(?:\.\d+)?)", args.calib_path)
+            if a: tag_extra += f"_a{a.group(1)}"
+            if b: tag_extra += f"_b{b.group(1)}"
+        return f"_smoothkvpaper_g{args.group_size}{tag_extra}"
     return f"_{m}"
 
 
@@ -157,6 +168,11 @@ if __name__ == "__main__":
 
     if data_args.tasks is not None:
         initialize_tasks()
+        # Register custom tasks (MATH500, etc.) shipped with this repo
+        try:
+            include_path(os.path.join(os.path.dirname(__file__), "tasks", "math500"))
+        except Exception as e:
+            print(f"[warn] include_path tasks/math500 failed: {e}")
         tasks_list = data_args.tasks.split(",")
         task_names = utils.pattern_match(tasks_list, ALL_TASKS)
         for task in [task for task in tasks_list if task not in task_names]:
