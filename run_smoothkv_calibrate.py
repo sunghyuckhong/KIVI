@@ -224,6 +224,12 @@ def main():
     torch.save({
         "s_K": s_K.cpu(),  # (L, num_kv_heads, D)
         "s_V": s_V.cpu(),
+        # Raw max statistics — used by make_alpha_variants.py to generate
+        # new s_K/s_V without rerunning the forward pass.
+        "max_q":         collector.max_q.cpu(),          # (L, num_q_heads, D)
+        "max_q_grouped": max_q_grouped.cpu(),            # (L, num_kv_heads, D)
+        "max_k":         collector.max_k.cpu(),          # (L, num_kv_heads, D)
+        "max_v":         collector.max_v.cpu(),          # (L, num_kv_heads, D)
         "alpha": alpha,
         "beta": beta,
         "model_path": args.model_path,

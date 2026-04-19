@@ -39,6 +39,8 @@ TASK_CFG = {
     "truthfulqa_mc1": dict(tasks=["truthfulqa_mc1"], num_fewshot=0),
     "truthfulqa_gen": dict(tasks=["truthfulqa_gen"], num_fewshot=0),
     "gpqa":  dict(tasks=["gpqa_diamond_cot_n_shot"]),
+    "gpqa_diamond_cot_zeroshot": dict(tasks=["gpqa_diamond_cot_zeroshot"]),
+    "math500":  dict(tasks=["math500"]),
 }
 
 
@@ -47,7 +49,7 @@ def parse_args():
     p.add_argument("--model",      choices=["fp16", "kivi", "pertoken", "fp8", "smoothkv"], required=True)
     p.add_argument("--calib_path", type=str, default=None,
                    help="Path to SmoothKV calibration .pt file (required when --model=smoothkv)")
-    p.add_argument("--task",       choices=["gsm8k", "gsm8k_zeroshot", "gsm8k_cot", "gsm8k_cot_zeroshot", "coqa", "truthfulqa_mc1", "truthfulqa_gen", "gpqa"], required=True)
+    p.add_argument("--task",       choices=["gsm8k", "gsm8k_zeroshot", "gsm8k_cot", "gsm8k_cot_zeroshot", "coqa", "truthfulqa_mc1", "truthfulqa_gen", "gpqa", "gpqa_diamond_cot_zeroshot", "math500"], required=True)
     p.add_argument("--group_size", type=int, default=32,
                    help="Quantization group size along head_dim (32 or 128)")
     p.add_argument("--residual",   type=int, default=32,
@@ -210,6 +212,13 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, use_fast=False)
     lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=args.batch_size)
+
+    # Register custom MATH500 task so simple_evaluate can resolve it
+    from lm_eval.tasks import include_path
+    try:
+        include_path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks", "math500"))
+    except Exception as e:
+        print(f"[warn] include_path math500 failed: {e}")
 
     results = simple_evaluate(
         model=lm,
