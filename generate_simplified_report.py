@@ -85,7 +85,24 @@ def collect_simplified_rows():
     for (model, short) in [(MI, mi), (L3, l3)]:
         rows.append(gs.row(model, "FP16", gs.modern_file(short, "fp16"), env="modern"))
         rows.append(gs.row(model, "KIVI-2 (g=32,r=128)", gs.modern_file(short, "kivi"), env="modern"))
-        rows.append(gs.row(model, "SmoothKV α=0.75 (best)", gs.modern_file(short, "smoothkv"), env="modern"))
+        rows.append(gs.row(model, "Naive INT4 per-token (g=128,r=0)",
+                           f"{{task}}_{short}_pertoken_int4_flat_noresidual_results.json",
+                           env="modern"))
+        rows.append(gs.row(model, "DeepSeekFP8 per-token (g=128)",
+                           f"{{task}}_{short}_fp8_g128_noresidual_results.json",
+                           env="modern"))
+        rows.append(gs.row(model, "SmoothKV α=0.75 (unmergeable)",
+                           gs.modern_file(short, "smoothkv"), env="modern"))
+        # Pair-mergeable rows (may be partial — only TQA+CoQA saved if reasoning runs failed)
+        a075_pair = f"{{task}}_{short}_smoothkv_g128_a0.75_pair_results.json"
+        if any((LOGS / a075_pair.format(task=t)).exists()
+               for t in ("coqa", "truthfulqa_gen", "gsm8k_32k", "math500_32k", "gpqa_diamond_cot_n_shot_32k")):
+            rows.append(gs.row(model, "SmoothKV α=0.75 pair (mergeable)", a075_pair, env="modern"))
+        for pk_tag, pk_label in [("90", "p=90"), ("95", "p=95"), ("99", "p=99"), ("99p9", "p=99.9")]:
+            f_tmpl = f"{{task}}_{short}_smoothkv_g128_pairK{pk_tag}_pV{pk_tag}_results.json"
+            if any((LOGS / f_tmpl.format(task=t)).exists()
+                   for t in ("coqa", "truthfulqa_gen", "gsm8k_32k", "math500_32k", "gpqa_diamond_cot_n_shot_32k")):
+                rows.append(gs.row(model, f"SmoothKV {pk_label} pair (mergeable)", f_tmpl, env="modern"))
 
     return rows
 

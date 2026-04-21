@@ -67,6 +67,8 @@ def parse_args():
     p.add_argument("--compile", action="store_true",
                    help="Wrap the loaded model with torch.compile(mode='reduce-overhead', dynamic=True). "
                         "Most effective on FP16 baseline; may help on KIVI paths if graph breaks are tolerable.")
+    p.add_argument("--limit", type=int, default=None,
+                   help="Limit evaluation to first N samples (bench / debug).")
     return p.parse_args()
 
 
@@ -267,6 +269,8 @@ def main():
         kwargs["task_manager"] = tm
     if args.max_gen_toks is not None:
         kwargs["gen_kwargs"] = f"max_gen_toks={args.max_gen_toks}"
+    if args.limit is not None:
+        kwargs["limit"] = args.limit
     results = simple_evaluate(
         model=lm,
         batch_size=args.batch_size,

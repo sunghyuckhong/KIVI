@@ -1,5 +1,4 @@
 dataset_path: Idavidrein/gpqa
-tag: gpqa
 output_type: generate_until
 process_docs: !function utils.process_docs
 training_split: train

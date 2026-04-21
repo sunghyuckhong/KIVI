@@ -63,9 +63,11 @@ cmd_task() {
   echo "$MODERN run_eval.py --model_path $MODEL --batch_size $BS $method_args --task $task $extra"
 }
 chain_stream() {
+  # TQA + CoQA already saved from previous failed runs — skip to reasoning tasks.
+  # Chain is && so a failure in task N aborts tasks N+1..
   local method_args=$1
   local parts=() t
-  for t in truthfulqa_gen coqa gsm8k_32k gpqa_diamond_cot_n_shot_32k math500_32k; do
+  for t in gsm8k_32k gpqa_diamond_cot_n_shot_32k math500_32k; do
     parts+=("$(cmd_task "$method_args" "$t")")
   done
   local out=""
