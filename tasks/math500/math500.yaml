@@ -1,4 +1,4 @@
-task: math500
+task: math500_32k
 dataset_path: HuggingFaceH4/MATH-500
 process_docs: !function utils.process_docs
 output_type: generate_until
@@ -11,7 +11,7 @@ generation_kwargs:
     - "Problem:"
   do_sample: false
   temperature: 0
-  max_gen_toks: 1024
+  max_gen_toks: 32768
 metric_list:
   - metric: exact_match
     aggregation: mean

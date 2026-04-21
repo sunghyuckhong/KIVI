@@ -1,8 +1,16 @@
 """Offline: from a calibration .pt that includes reservoir samples (samples_k,
-samples_v), generate new s_K / s_V as percentile-based scales per Eq 11 of
+samples_v), generate new s_K / s_V as percentile-based scales per Eq 7 of
 the SmoothKV paper. Writes one .pt per (p_K, p_V) pair.
 
-Output filename: replace/append _p<pK>_<pV> to the base stem.
+Default is the MERGEABLE form (Eq. 7): s_K is pair-maxed over adjacent
+channels (2i, 2i+1) to satisfy the pair-equal constraint of Eq. 2 — this
+lets the smoothing be folded into the preceding layer's weights at inference
+time. The non-pair (unmergeable) form is available with --no-pair-max-k
+for comparison.
+
+Output tag encodes the form:
+  pair-max-k → _pairK{p}_pV{p}
+  no pair-max → _pK{p}_pV{p}
 
 Usage:
   python scripts/make_percentile_variants.py \
@@ -25,18 +33,30 @@ def parse_args():
                    help="Percentile values for V. Default: same as --pk.")
     p.add_argument("--symmetric", action="store_true",
                    help="If set, only produce (p, p) pairs from --pk; ignores --pv.")
+    p.add_argument("--pair_max_k", dest="pair_max_k", action="store_true",
+                   default=True,
+                   help="Default. Pair-max s_K over adjacent channels (2i, 2i+1) "
+                        "to satisfy the Eq. 2 pair-equal constraint (mergeable form, Eq. 7).")
+    p.add_argument("--no-pair-max-k", dest="pair_max_k", action="store_false",
+                   help="Disable pair-max: use per-channel s_K (violates pair-equal "
+                        "constraint → NOT mergeable into preceding weights at inference).")
     p.add_argument("--out_dir", default=None)
     return p.parse_args()
 
 
-def compute_percentile_scales(samples_k, samples_v, count_k, count_v, pk, pv, eps=1e-5):
+def compute_percentile_scales(samples_k, samples_v, count_k, count_v, pk, pv,
+                              pair_max_k=True, eps=1e-5):
     """samples_k, samples_v: (L, nh, D, R) fp16 CPU tensors.
     count_k, count_v: (L, nh, D) long — how many real values each reservoir holds
-    (we only quantile over the valid prefix when count < R)."""
+    (we only quantile over the valid prefix when count < R).
+
+    When pair_max_k is True (Eq. 7), s_K[:, :, 2i] and s_K[:, :, 2i+1] are both
+    set to max of the two per-channel percentiles — this is the pair-equal form
+    required for mergeability with RoPE's channel-pair structure (Eq. 2)."""
     L, nh, D, R = samples_k.shape
+    assert D % 2 == 0, f"channel dim {D} must be even for pair-max (RoPE)"
 
     def _quant(s, counts, p):
-        # Per channel (layer, head, c), compute percentile over the valid values.
         out = torch.zeros(L, nh, D, dtype=torch.float32)
         for l in range(L):
             for h in range(nh):
@@ -52,10 +72,11 @@ def compute_percentile_scales(samples_k, samples_v, count_k, count_v, pk, pv, ep
 
     s_K = _quant(samples_k, count_k, pk).clamp(min=eps)
     s_V = _quant(samples_v, count_v, pv).clamp(min=eps)
-    # Geo-mean normalize per (layer, head) — same as max-based calibration
-    for s in (s_K, s_V):
-        log_s = s.log()
-        s.copy_((log_s - log_s.mean(dim=-1, keepdim=True)).exp())
+
+    if pair_max_k:
+        # (s_K)_pair_i = max(|K_{:,2i}|^p, |K_{:,2i+1}|^p)  — Eq. 7
+        s_K_pairs = s_K.view(L, nh, D // 2, 2).max(dim=-1, keepdim=True).values
+        s_K = s_K_pairs.expand(L, nh, D // 2, 2).reshape(L, nh, D).clone()
     return s_K, s_V
 
 
@@ -85,13 +106,15 @@ def main():
         pvs = args.pv if args.pv is not None else args.pk
         pairs = [(pk, pv) for pk in args.pk for pv in pvs]
 
+    k_prefix = "pairK" if args.pair_max_k else "pK"
     for pk, pv in pairs:
         s_K, s_V = compute_percentile_scales(
             base["samples_k"], base["samples_v"],
             base["count_k"],   base["count_v"],
             pk, pv,
+            pair_max_k=args.pair_max_k,
         )
-        tag = f"_pK{fmt_p(pk)}_pV{fmt_p(pv)}"
+        tag = f"_{k_prefix}{fmt_p(pk)}_pV{fmt_p(pv)}"
         out_name = f"{stem}{tag}.pt"
         out = os.path.join(out_dir, out_name)
         payload = {k: v for k, v in base.items()
@@ -101,8 +124,13 @@ def main():
         payload["s_V"] = s_V
         payload["percentile_pk"] = pk
         payload["percentile_pv"] = pv
+        payload["pair_max_k"] = args.pair_max_k
         torch.save(payload, out)
-        print(f"pK={pk:>5}% pV={pv:>5}%  →  {out}   "
+        # Sanity-print: under pair_max_k, adjacent channels should be equal.
+        if args.pair_max_k:
+            diff = (s_K[..., 0::2] - s_K[..., 1::2]).abs().max().item()
+            assert diff < 1e-6, f"pair-max s_K violates pair-equal: diff={diff}"
+        print(f"{k_prefix}={pk:>5}% pV={pv:>5}%  →  {out}   "
               f"s_K[{s_K.min():.3f}, {s_K.max():.3f}]   "
               f"s_V[{s_V.min():.3f}, {s_V.max():.3f}]")
 
