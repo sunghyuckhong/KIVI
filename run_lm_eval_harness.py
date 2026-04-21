@@ -193,17 +193,18 @@ if __name__ == "__main__":
                                       dynamic=True, fullgraph=False)
 
     if data_args.tasks is not None:
-        math500_dir = os.path.join(os.path.dirname(__file__), "tasks", "math500")
+        # Register ALL local task dirs (math500, gsm8k_32k, gpqa_*_32k, aime*), not just math500.
+        tasks_dir = os.path.join(os.path.dirname(__file__), "tasks")
         tm = None
         if _USE_OLD_TASKS_API:
             initialize_tasks()
             try:
-                include_path(math500_dir)
+                include_path(tasks_dir)
             except Exception as e:
-                print(f"[warn] include_path tasks/math500 failed: {e}")
+                print(f"[warn] include_path {tasks_dir} failed: {e}")
             all_names = ALL_TASKS
         else:
-            tm = TaskManager(include_path=math500_dir)
+            tm = TaskManager(include_path=tasks_dir)
             all_names = tm.all_tasks
         tasks_list = data_args.tasks.split(",")
         task_names = utils.pattern_match(tasks_list, all_names)

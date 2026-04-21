@@ -249,17 +249,18 @@ def main():
     #   * paper env (commit c9bbec6e): include_path is a module-level function
     #   * modern env (0.4.2): include_path is a TaskManager method, and the
     #     TaskManager must be passed to simple_evaluate for it to see the task.
-    math500_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks", "math500")
+    # Register ALL local task dirs (math500, gsm8k_32k, gpqa_*_32k, aime*), not just math500.
+    tasks_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks")
     tm = None
     try:
         from lm_eval.tasks import include_path as _include_path
-        _include_path(math500_dir)
+        _include_path(tasks_dir)
     except (ImportError, AttributeError):
         try:
             from lm_eval.tasks import TaskManager
-            tm = TaskManager(include_path=math500_dir)
+            tm = TaskManager(include_path=tasks_dir)
         except Exception as e:
-            print(f"[warn] include_path math500 failed: {e}")
+            print(f"[warn] include_path {tasks_dir} failed: {e}")
 
     kwargs = dict(**TASK_CFG[args.task])
     if tm is not None:
