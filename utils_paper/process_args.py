@@ -123,6 +123,10 @@ class DataArguments:
         metadata={"help": "Per-run override for task generation_kwargs.max_gen_toks. "
                           "None means use whatever the task.yaml specifies (or HFLM default 256)."},
     )
+    compile: Optional[bool] = field(
+        default=False,
+        metadata={"help": "Wrap the loaded model with torch.compile for faster generation."},
+    )
 
 
 

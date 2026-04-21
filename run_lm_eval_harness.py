@@ -185,6 +185,13 @@ if __name__ == "__main__":
         if restore is not None:
             restore()
 
+    if data_args.compile:
+        # Compile the underlying HF model (model._model is the actual nn.Module,
+        # the outer `model` is an HFLM/LMEvalLlamaForCausalLM wrapper).
+        print(f"[compile] torch.compile(mode='reduce-overhead', dynamic=True, fullgraph=False)")
+        model._model = torch.compile(model._model, mode="reduce-overhead",
+                                      dynamic=True, fullgraph=False)
+
     if data_args.tasks is not None:
         math500_dir = os.path.join(os.path.dirname(__file__), "tasks", "math500")
         tm = None

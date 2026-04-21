@@ -64,6 +64,9 @@ def parse_args():
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--max_gen_toks", type=int, default=None,
                    help="Per-run override for task generation_kwargs.max_gen_toks.")
+    p.add_argument("--compile", action="store_true",
+                   help="Wrap the loaded model with torch.compile(mode='reduce-overhead', dynamic=True). "
+                        "Most effective on FP16 baseline; may help on KIVI paths if graph breaks are tolerable.")
     return p.parse_args()
 
 
@@ -95,7 +98,23 @@ def output_name(args):
     elif args.model == "fp8":
         return f"{t}_{m}_fp8{grp_tag}{res_tag}"
     elif args.model == "smoothkv":
-        return f"{t}_{m}_smoothkv{grp_tag}"
+        # Encode calib variant (α=0.75 pair / pairK90/95/99/99.9) so pair-mergeable
+        # runs don't collide with the original α=0.75 baseline.
+        calib_tag = ""
+        if args.calib_path:
+            import re
+            a     = re.search(r"_a(\d+(?:\.\d+)?)",     args.calib_path)
+            pair  = re.search(r"_pairK(\d+p?\d*)",      args.calib_path)
+            pK    = re.search(r"(?<!pair)_pK(\d+p?\d*)", args.calib_path)
+            pV    = re.search(r"_pV(\d+p?\d*)",         args.calib_path)
+            alpha_pair = bool(re.search(r"_a\d+(?:\.\d+)?(?:_b\d+(?:\.\d+)?)?_pair(?!K)",
+                                        args.calib_path))
+            if a:          calib_tag += f"_a{a.group(1)}"
+            if alpha_pair: calib_tag += "_pair"
+            if pair:       calib_tag += f"_pairK{pair.group(1)}"
+            elif pK:       calib_tag += f"_pK{pK.group(1)}"
+            if pV:         calib_tag += f"_pV{pV.group(1)}"
+        return f"{t}_{m}_smoothkv{grp_tag}{calib_tag}"
     else:  # pertoken
         flat = "_flat" if args.group_size == 128 else ""
         return f"{t}_{m}_pertoken{bits_tag}{flat}{res_tag}"
@@ -214,6 +233,14 @@ def main():
 
     model = load_model(args)
     model.eval()
+
+    if args.compile:
+        # reduce-overhead uses CUDA graphs for steady-state decode, dynamic=True
+        # allows the shape range that autoregressive generation needs.
+        # fullgraph=False tolerates graph breaks from custom quant kernels in the
+        # KIVI/SmoothKV paths — they'll be compiled in segments.
+        print(f"[compile] torch.compile(mode='reduce-overhead', dynamic=True, fullgraph=False)")
+        model = torch.compile(model, mode="reduce-overhead", dynamic=True, fullgraph=False)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, use_fast=False)
     lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=args.batch_size)
