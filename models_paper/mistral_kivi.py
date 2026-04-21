@@ -1366,9 +1366,15 @@ class MistralForSequenceClassification(MistralPreTrainedModel):
 
 import os
 import transformers
-from lm_eval.utils import MultiTokenEOSCriteria, stop_sequences_criteria
+try:
+    from lm_eval.utils import MultiTokenEOSCriteria, stop_sequences_criteria
+except ImportError:
+    from lm_eval.models.utils import MultiTokenEOSCriteria, stop_sequences_criteria
 from lm_eval.models.huggingface import HFLM, eval_logger, _get_accelerate_args
 from lm_eval import utils
+if not hasattr(utils, "get_dtype"):
+    from lm_eval.models.utils import get_dtype as _get_dtype
+    utils.get_dtype = _get_dtype
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
     MODEL_FOR_SEQ_TO_SEQ_CAUSAL_LM_MAPPING_NAMES,
@@ -1528,7 +1534,12 @@ class LMEvalMistralForCausalLM_KIVI(HFLM):
         self.truncation = truncation
 
         self.vocab_size = self.tokenizer.vocab_size
-        self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+        if self.tokenizer.pad_token:
+            pass
+        elif self.tokenizer.unk_token is not None:
+            self.tokenizer.pad_token_id = self.tokenizer.unk_token_id
+        elif self.tokenizer.eos_token is not None:
+            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
         self._max_length = max_length
 

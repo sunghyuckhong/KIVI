@@ -24,12 +24,15 @@ def load_json(path):
 
 def get_gsm8k(fname):
     d = load_json(LOGS / fname)
-    if not d or "gsm8k" not in d:
+    if not d:
         return None
-    r = d["gsm8k"]
-    v = r.get("exact_match,strict-match") or r.get("exact_match,get-answer") \
-        or r.get("exact_match,flexible-extract")
-    return v * 100 if v is not None else None
+    for key in ("gsm8k_32k", "gsm8k"):
+        if key in d:
+            r = d[key]
+            v = r.get("exact_match,strict-match") or r.get("exact_match,get-answer") \
+                or r.get("exact_match,flexible-extract")
+            return v * 100 if v is not None else None
+    return None
 
 
 def get_coqa_em(fname):
@@ -49,19 +52,25 @@ def get_tfqa_bleu(fname):
 
 def get_gpqa(fname):
     d = load_json(LOGS / fname)
-    if not d or "gpqa_diamond_cot_zeroshot" not in d:
+    if not d:
         return None
-    r = d["gpqa_diamond_cot_zeroshot"]
-    v = r.get("exact_match,flexible-extract") or r.get("exact_match,strict-match")
-    return v * 100 if v is not None else None
+    for key in ("gpqa_diamond_cot_n_shot_32k", "gpqa_diamond_cot_n_shot", "gpqa_diamond_cot_zeroshot"):
+        if key in d:
+            r = d[key]
+            v = r.get("exact_match,flexible-extract") or r.get("exact_match,strict-match")
+            return v * 100 if v is not None else None
+    return None
 
 
 def get_math500(fname):
     d = load_json(LOGS / fname)
-    if not d or "math500" not in d:
+    if not d:
         return None
-    v = d["math500"].get("exact_match,none")
-    return v * 100 if v is not None else None
+    for key in ("math500_32k", "math500"):
+        if key in d:
+            v = d[key].get("exact_match,none")
+            return v * 100 if v is not None else None
+    return None
 
 
 PAPER_TARGETS = {
@@ -102,11 +111,14 @@ def paper_method_file(model_short, method, g=None, bits=None, res=None, alpha=No
 
 def row(model, method, file_tmpl, paper_key_method=None, env="paper"):
     """Build a result row — file_tmpl has '{task}' placeholder."""
-    gsm8k   = get_gsm8k(file_tmpl.format(task="gsm8k"))
+    # Prefer _32k (reasoning benchmarks) results; fall back to legacy 256/1024 files if _32k missing.
+    gsm8k = get_gsm8k(file_tmpl.format(task="gsm8k_32k")) or get_gsm8k(file_tmpl.format(task="gsm8k"))
     coqa_em = get_coqa_em(file_tmpl.format(task="coqa"))
     tfqa    = get_tfqa_bleu(file_tmpl.format(task="truthfulqa_gen"))
-    gpqa    = get_gpqa(file_tmpl.format(task="gpqa_diamond_cot_zeroshot"))
-    math500 = get_math500(file_tmpl.format(task="math500"))
+    gpqa = get_gpqa(file_tmpl.format(task="gpqa_diamond_cot_n_shot_32k")) \
+        or get_gpqa(file_tmpl.format(task="gpqa_diamond_cot_n_shot")) \
+        or get_gpqa(file_tmpl.format(task="gpqa_diamond_cot_zeroshot"))
+    math500 = get_math500(file_tmpl.format(task="math500_32k")) or get_math500(file_tmpl.format(task="math500"))
     return dict(
         model=model, method=method, env=env, paper_key_method=paper_key_method,
         gsm8k=gsm8k, coqa_em=coqa_em, tfqa=tfqa, gpqa=gpqa, math500=math500,
@@ -175,8 +187,6 @@ def collect_rows():
                         paper_file(short, 4, 32, 128), env="paper"))
         rows.append(row(model, "KIVI-4 (g=128,r=128)",
                         paper_file(short, 4, 128, 128), env="paper"))
-        rows.append(row(model, "KIVI-4 (g=32,r=32)",
-                        paper_file(short, 4, 32, 32), env="paper"))
         rows.append(row(model, "Naive INT4 per-token (g=128,r=0)",
                         paper_method_file(short, "pertoken", g=128, bits=4, res=0), env="paper"))
         rows.append(row(model, "DeepSeekFP8 per-token (g=128)",
@@ -186,6 +196,23 @@ def collect_rows():
             rows.append(row(model, f"SmoothKV {a_label}",
                             paper_method_file(short, "smoothkv", g=128, alpha=a_tag),
                             env="paper"))
+        # α=0.75 pair-max (mergeable, Eq. 7 form)
+        a075_pair = f"{{task}}_{short}_smoothkvpaper_g128_a0.75_pair_paper_results.json"
+        if any((LOGS / a075_pair.format(task=t)).exists()
+               for t in ("coqa", "gsm8k", "truthfulqa_gen", "math500", "gpqa_diamond_cot_n_shot")):
+            rows.append(row(model, "SmoothKV α=0.75 pair (mergeable)", a075_pair, env="paper"))
+        # Unmergeable per-channel percentile
+        for pk_tag, pk_label in [("95", "p=95"), ("99", "p=99"), ("99p9", "p=99.9")]:
+            f_tmpl = f"{{task}}_{short}_smoothkvpaper_g128_pK{pk_tag}_pV{pk_tag}_paper_results.json"
+            if any((LOGS / f_tmpl.format(task=t)).exists()
+                   for t in ("coqa", "gsm8k", "truthfulqa_gen", "math500", "gpqa_diamond_cot_n_shot")):
+                rows.append(row(model, f"SmoothKV {pk_label} (unmergeable)", f_tmpl, env="paper"))
+        # Mergeable pair-max percentile (Eq. 7)
+        for pk_tag, pk_label in [("95", "p=95"), ("99", "p=99"), ("99p9", "p=99.9")]:
+            f_tmpl = f"{{task}}_{short}_smoothkvpaper_g128_pairK{pk_tag}_pV{pk_tag}_paper_results.json"
+            if any((LOGS / f_tmpl.format(task=t)).exists()
+                   for t in ("coqa", "gsm8k", "truthfulqa_gen", "math500", "gpqa_diamond_cot_n_shot")):
+                rows.append(row(model, f"SmoothKV {pk_label} pair (mergeable)", f_tmpl, env="paper"))
 
     # Modern-env instruct models (only FP16 / KIVI-2 / SmoothKV α=0.75)
     for (model, short) in [(MI, mi), (L3, l3)]:
@@ -275,7 +302,7 @@ def build_html():
       <th>CoQA<br><span style="font-weight:normal;font-size:0.82em">EM</span></th>
       <th>TruthfulQA gen<br><span style="font-weight:normal;font-size:0.82em">BLEU max</span></th>
       <th>GSM8K (5-shot)<br><span style="font-weight:normal;font-size:0.82em">EM strict</span></th>
-      <th>GPQA-Diamond<br><span style="font-weight:normal;font-size:0.82em">EM 0-shot CoT</span></th>
+      <th>GPQA-Diamond<br><span style="font-weight:normal;font-size:0.82em">EM 5-shot CoT</span></th>
       <th>MATH500<br><span style="font-weight:normal;font-size:0.82em">EM</span></th>
     </tr>
   </thead>

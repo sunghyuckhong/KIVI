@@ -9,17 +9,17 @@ from torch import nn
 from quant.new_pack import triton_quantize_and_pack_along_last_dim
 from quant.matmul import cuda_bmm_fA_qB_outer
 
-from transformers.models.llama.configuration_llama import *
-from transformers.models.llama.modeling_llama import *
+from transformers.models.qwen2.configuration_qwen2 import *
+from transformers.models.qwen2.modeling_qwen2 import *
 from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
 
-_CONFIG_FOR_DOC = "LlamaConfig"
+_CONFIG_FOR_DOC = "Qwen2Config"
 
 
-class LlamaAttention_KIVI(nn.Module):
+class Qwen2Attention_KIVI(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: Qwen2Config):
         super().__init__()
         self.config = config
         self.attention_dropout = config.attention_dropout
@@ -35,6 +35,7 @@ class LlamaAttention_KIVI(nn.Module):
         self.v_bits = config.v_bits
         self.group_size = config.group_size
         self.residual_length = config.residual_length
+        assert getattr(config, "use_flash", False), "currently KIVI is only available for flash-attn. Please add ```config.use_flash = True```"
 
         if (self.head_dim * self.num_heads) != self.hidden_size:
             raise ValueError(
@@ -42,38 +43,18 @@ class LlamaAttention_KIVI(nn.Module):
                 f" and `num_heads`: {self.num_heads})."
             )
 
-        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=config.attention_bias)
-        self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
-        self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=config.attention_bias)
-        self._init_rope()
+        # Qwen2 uses bias on q/k/v (not configurable like Llama's attention_bias)
+        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=True)
+        self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=True)
+        self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=True)
+        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
+        # Qwen2RotaryEmbedding in transformers 4.43 uses the pre-v4.45 signature
+        self.rotary_emb = Qwen2RotaryEmbedding(
+            self.head_dim,
+            max_position_embeddings=self.max_position_embeddings,
+            base=self.rope_theta,
+        )
 
-    def _init_rope(self):
-        if self.config.rope_scaling is None:
-            self.rotary_emb = LlamaRotaryEmbedding(
-                self.head_dim,
-                max_position_embeddings=self.max_position_embeddings,
-                base=self.rope_theta,
-            )
-        else:
-            scaling_type = self.config.rope_scaling["type"]
-            scaling_factor = self.config.rope_scaling["factor"]
-            if scaling_type == "linear":
-                self.rotary_emb = LlamaLinearScalingRotaryEmbedding(
-                    self.head_dim,
-                    max_position_embeddings=self.max_position_embeddings,
-                    scaling_factor=scaling_factor,
-                    base=self.rope_theta,
-                )
-            elif scaling_type == "dynamic":
-                self.rotary_emb = LlamaDynamicNTKScalingRotaryEmbedding(
-                    self.head_dim,
-                    max_position_embeddings=self.max_position_embeddings,
-                    scaling_factor=scaling_factor,
-                    base=self.rope_theta,
-                )
-            else:
-                raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
@@ -94,21 +75,21 @@ class LlamaAttention_KIVI(nn.Module):
             )
         bsz, q_len, _ = hidden_states.size()
 
-        if self.config.pretraining_tp > 1:
-            key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
+        if getattr(self.config, "pretraining_tp", 1) > 1:
+            key_value_slicing = (self.num_key_value_heads * self.head_dim) // getattr(self.config, "pretraining_tp", 1)
             query_slices = self.q_proj.weight.split(
-                (self.num_heads * self.head_dim) // self.config.pretraining_tp, dim=0
+                (self.num_heads * self.head_dim) // getattr(self.config, "pretraining_tp", 1), dim=0
             )
             key_slices = self.k_proj.weight.split(key_value_slicing, dim=0)
             value_slices = self.v_proj.weight.split(key_value_slicing, dim=0)
 
-            query_states = [F.linear(hidden_states, query_slices[i]) for i in range(self.config.pretraining_tp)]
+            query_states = [F.linear(hidden_states, query_slices[i]) for i in range(getattr(self.config, "pretraining_tp", 1))]
             query_states = torch.cat(query_states, dim=-1)
 
-            key_states = [F.linear(hidden_states, key_slices[i]) for i in range(self.config.pretraining_tp)]
+            key_states = [F.linear(hidden_states, key_slices[i]) for i in range(getattr(self.config, "pretraining_tp", 1))]
             key_states = torch.cat(key_states, dim=-1)
 
-            value_states = [F.linear(hidden_states, value_slices[i]) for i in range(self.config.pretraining_tp)]
+            value_states = [F.linear(hidden_states, value_slices[i]) for i in range(getattr(self.config, "pretraining_tp", 1))]
             value_states = torch.cat(value_states, dim=-1)
 
         else:
@@ -123,7 +104,7 @@ class LlamaAttention_KIVI(nn.Module):
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
             kv_seq_len += past_key_value[-1]
-        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+        cos, sin = self.rotary_emb(value_states, position_ids)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
         assert self.num_key_value_groups == 1
         # [bsz, nh, t, hd]
@@ -276,17 +257,17 @@ class LlamaAttention_KIVI(nn.Module):
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
-        if self.config.pretraining_tp > 1:
-            attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
-            o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
-            attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
+        if getattr(self.config, "pretraining_tp", 1) > 1:
+            attn_output = attn_output.split(self.hidden_size // getattr(self.config, "pretraining_tp", 1), dim=2)
+            o_proj_slices = self.o_proj.weight.split(self.hidden_size // getattr(self.config, "pretraining_tp", 1), dim=1)
+            attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(getattr(self.config, "pretraining_tp", 1))])
         else:
             attn_output = self.o_proj(attn_output)
 
         attn_weights = None
         return attn_output, attn_weights, past_key_value
     
-class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
+class Qwen2FlashAttention_KIVI(Qwen2Attention_KIVI):
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -303,21 +284,21 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
             )
         bsz, q_len, _ = hidden_states.size()
 
-        if self.config.pretraining_tp > 1:
-            key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
+        if getattr(self.config, "pretraining_tp", 1) > 1:
+            key_value_slicing = (self.num_key_value_heads * self.head_dim) // getattr(self.config, "pretraining_tp", 1)
             query_slices = self.q_proj.weight.split(
-                (self.num_heads * self.head_dim) // self.config.pretraining_tp, dim=0
+                (self.num_heads * self.head_dim) // getattr(self.config, "pretraining_tp", 1), dim=0
             )
             key_slices = self.k_proj.weight.split(key_value_slicing, dim=0)
             value_slices = self.v_proj.weight.split(key_value_slicing, dim=0)
 
-            query_states = [F.linear(hidden_states, query_slices[i]) for i in range(self.config.pretraining_tp)]
+            query_states = [F.linear(hidden_states, query_slices[i]) for i in range(getattr(self.config, "pretraining_tp", 1))]
             query_states = torch.cat(query_states, dim=-1)
 
-            key_states = [F.linear(hidden_states, key_slices[i]) for i in range(self.config.pretraining_tp)]
+            key_states = [F.linear(hidden_states, key_slices[i]) for i in range(getattr(self.config, "pretraining_tp", 1))]
             key_states = torch.cat(key_states, dim=-1)
 
-            value_states = [F.linear(hidden_states, value_slices[i]) for i in range(self.config.pretraining_tp)]
+            value_states = [F.linear(hidden_states, value_slices[i]) for i in range(getattr(self.config, "pretraining_tp", 1))]
             value_states = torch.cat(value_states, dim=-1)
 
         else:
@@ -332,9 +313,9 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
             kv_seq_len += past_key_value[-1]
-        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+        cos, sin = self.rotary_emb(value_states, position_ids)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
-        assert self.num_key_value_groups == 1
+        # assert self.num_key_value_groups == 1
         # [bsz, nh, t, hd]
         if past_key_value is not None:
             key_states_quant_trans = past_key_value[0]
@@ -345,7 +326,6 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
             value_states_full = past_key_value[5]
             value_scale = past_key_value[6]
             value_mn = past_key_value[7]
-
             if key_states_quant_trans is not None:
                 att_qkquant = cuda_bmm_fA_qB_outer(self.group_size, query_states, key_states_quant_trans, 
                                 key_scale_trans, key_mn_trans, self.k_bits)
@@ -360,7 +340,7 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
                 key_states_full = torch.cat([key_states_full, key_states], dim=2)
             else:
                 key_states_full = key_states
-            att_qkfull = torch.matmul(query_states, key_states_full.transpose(2, 3))
+            att_qkfull = torch.matmul(query_states, repeat_kv(key_states_full, self.num_key_value_groups).transpose(2, 3))
             if att_qkquant is not None:
                 attn_weights = torch.cat([att_qkquant, att_qkfull], dim=-1) / math.sqrt(self.head_dim)
             else:
@@ -407,7 +387,7 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
             else:
                 attn_output = cuda_bmm_fA_qB_outer(self.group_size, attn_weights[:, :, :, :-value_full_length], value_states_quant, 
                                                 value_scale, value_mn, self.v_bits)
-                attn_output += torch.matmul(attn_weights[:, :, :, -value_full_length:], value_states_full)
+                attn_output += torch.matmul(attn_weights[:, :, :, -value_full_length:], repeat_kv(value_states_full, self.num_key_value_groups))
             attn_output = attn_output.transpose(1, 2).contiguous()
             if value_full_length > self.residual_length:
                 assert value_full_length == self.residual_length + 1
@@ -444,8 +424,8 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
                 key_states = key_states.to(target_dtype)
                 value_states = value_states.to(target_dtype)
             attn_output = self._flash_attention_forward(
-                query_states.transpose(1, 2), key_states.transpose(1, 2), 
-                value_states.transpose(1, 2), None, q_len, dropout=0.0
+                query_states.transpose(1, 2), key_states.transpose(1, 2),
+                value_states.transpose(1, 2), attention_mask, q_len, dropout=0.0
             )
             # quantize
             if key_states.shape[-2] % self.residual_length != 0:
@@ -481,10 +461,10 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
                           value_states_quant, value_states_full, value_scale, value_mn, kv_seq_len) if use_cache else None
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
-        if self.config.pretraining_tp > 1:
-            attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
-            o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
-            attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
+        if getattr(self.config, "pretraining_tp", 1) > 1:
+            attn_output = attn_output.split(self.hidden_size // getattr(self.config, "pretraining_tp", 1), dim=2)
+            o_proj_slices = self.o_proj.weight.split(self.hidden_size // getattr(self.config, "pretraining_tp", 1), dim=1)
+            attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(getattr(self.config, "pretraining_tp", 1))])
         else:
             attn_output = self.o_proj(attn_output)
 
@@ -514,6 +494,8 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
             softmax_scale (`float`, *optional*):
                 The scaling of QK^T before applying softmax. Default to 1 / sqrt(head_dim)
         """
+        from flash_attn import flash_attn_func, flash_attn_varlen_func
+
         # Contains at least one padding token in the sequence
         if attention_mask is not None:
             batch_size = query_states.shape[0]
@@ -585,18 +567,18 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
         )
     
 
-class LlamaDecoderLayer_KIVI(nn.Module):
-    def __init__(self, config: LlamaConfig):
+class Qwen2DecoderLayer_KIVI(nn.Module):
+    def __init__(self, config: Qwen2Config):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.self_attn = (
-            LlamaAttention_KIVI(config=config)
+            Qwen2Attention_KIVI(config=config)
             if not getattr(config, "use_flash", False)
-            else LlamaFlashAttention_KIVI(config=config)
+            else Qwen2FlashAttention_KIVI(config=config)
         )
-        self.mlp = LlamaMLP(config)
-        self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.mlp = Qwen2MLP(config)
+        self.input_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -659,22 +641,22 @@ class LlamaDecoderLayer_KIVI(nn.Module):
 
         return outputs
 
-class LlamaModel_KIVI(LlamaPreTrainedModel):
+class Qwen2Model_KIVI(Qwen2PreTrainedModel):
     """
-    Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`LlamaDecoderLayer`]
+    Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`Qwen2DecoderLayer`]
 
     Args:
-        config: LlamaConfig
+        config: Qwen2Config
     """
 
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: Qwen2Config):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList([LlamaDecoderLayer_KIVI(config) for _ in range(config.num_hidden_layers)])
-        self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.layers = nn.ModuleList([Qwen2DecoderLayer_KIVI(config) for _ in range(config.num_hidden_layers)])
+        self.norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
@@ -686,7 +668,7 @@ class LlamaModel_KIVI(LlamaPreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
-    @add_start_docstrings_to_model_forward(LLAMA_INPUTS_DOCSTRING)
+    @add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -806,12 +788,12 @@ class LlamaModel_KIVI(LlamaPreTrainedModel):
         )
 
 
-class LlamaForCausalLM_KIVI(LlamaPreTrainedModel):
+class Qwen2ForCausalLM_KIVI(Qwen2PreTrainedModel):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):
         super().__init__(config)
-        self.model = LlamaModel_KIVI(config)
+        self.model = Qwen2Model_KIVI(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
@@ -836,7 +818,7 @@ class LlamaForCausalLM_KIVI(LlamaPreTrainedModel):
     def get_decoder(self):
         return self.model
 
-    @add_start_docstrings_to_model_forward(LLAMA_INPUTS_DOCSTRING)
+    @add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
     def forward(
         self,
@@ -863,9 +845,9 @@ class LlamaForCausalLM_KIVI(LlamaPreTrainedModel):
         Example:
 
         ```python
-        >>> from transformers import AutoTokenizer, LlamaForCausalLM
+        >>> from transformers import AutoTokenizer, Qwen2ForCausalLM
 
-        >>> model = LlamaForCausalLM.from_pretrained(PATH_TO_CONVERTED_WEIGHTS)
+        >>> model = Qwen2ForCausalLM.from_pretrained(PATH_TO_CONVERTED_WEIGHTS)
         >>> tokenizer = AutoTokenizer.from_pretrained(PATH_TO_CONVERTED_TOKENIZER)
 
         >>> prompt = "Hey, are you conscious? Can you talk to me?"
@@ -896,9 +878,9 @@ class LlamaForCausalLM_KIVI(LlamaPreTrainedModel):
         )
 
         hidden_states = outputs[0]
-        if self.config.pretraining_tp > 1:
-            lm_head_slices = self.lm_head.weight.split(self.vocab_size // self.config.pretraining_tp, dim=0)
-            logits = [F.linear(hidden_states, lm_head_slices[i]) for i in range(self.config.pretraining_tp)]
+        if getattr(self.config, "pretraining_tp", 1) > 1:
+            lm_head_slices = self.lm_head.weight.split(self.vocab_size // getattr(self.config, "pretraining_tp", 1), dim=0)
+            logits = [F.linear(hidden_states, lm_head_slices[i]) for i in range(getattr(self.config, "pretraining_tp", 1))]
             logits = torch.cat(logits, dim=-1)
         else:
             logits = self.lm_head(hidden_states)
@@ -932,6 +914,10 @@ class LlamaForCausalLM_KIVI(LlamaPreTrainedModel):
     def prepare_inputs_for_generation(
         self, input_ids, past_key_values=None, attention_mask=None, inputs_embeds=None, **kwargs
     ):
+        if isinstance(past_key_values, DynamicCache):
+            past_key_values = past_key_values.to_legacy_cache()
+            if len(past_key_values) == 0:
+                past_key_values = None
         if past_key_values is not None:
             past_length = past_key_values[0][-1]
             # Some generation methods already pass only the last input ID
@@ -975,238 +961,3 @@ class LlamaForCausalLM_KIVI(LlamaPreTrainedModel):
                 tuple(past_state.index_select(0, beam_idx.to(past_state.device)) for past_state in layer_past),
             )
         return reordered_past
-
-
-import os
-import transformers
-from lm_eval.models.huggingface import HFLM, eval_logger, _get_accelerate_args
-from lm_eval import utils
-if not hasattr(utils, "get_dtype"):
-    from lm_eval.models.utils import get_dtype as _get_dtype
-    utils.get_dtype = _get_dtype
-from accelerate import Accelerator, DistributedType
-
-
-class LMEvalLlamaForCausalLM_KIVI(HFLM):
-    AUTO_MODEL_CLASS = None
-    _DEFAULT_MAX_LENGTH = 2048
-    def __init__(
-        self,
-        k_bits,
-        v_bits,
-        group_size,
-        residual_length,
-        pretrained: Optional[str] = "gpt2",
-        revision: Optional[str] = "main",
-        subfolder: Optional[str] = None,
-        tokenizer: Optional[str] = None,
-        truncation: Optional[bool] = False,
-        max_length: Optional[int] = None,
-        device: Optional[str] = "cuda",
-        dtype: Optional[Union[str, torch.dtype]] = "auto",
-        batch_size: Optional[Union[int, str]] = 1,
-        max_batch_size: Optional[int] = 64,
-        low_cpu_mem_usage: Optional[bool] = True,
-        trust_remote_code: Optional[bool] = False,
-        use_fast_tokenizer: Optional[bool] = True,
-        cache_dir: Optional[Union[str, os.PathLike]] = None,
-        # arguments used for splitting a model across GPUs naively.
-        # only used if `parallelize=True`.
-        parallelize: Optional[bool] = False,
-        device_map_option: Optional[str] = "auto",
-        max_memory_per_gpu: Optional[Union[int, str]] = None,
-        max_cpu_memory: Optional[Union[int, str]] = None,
-        offload_folder: Optional[str] = "./offload",
-        load_in_8bit: Optional[bool] = False,
-        load_in_4bit: Optional[bool] = False,
-        bnb_4bit_quant_type: Optional[str] = None,
-        bnb_4bit_compute_dtype: Optional[Union[str, torch.dtype]] = None,
-        gptq: Optional[Union[bool, str]] = False,
-        gptq_use_triton: Optional[bool] = False,
-    ) -> None:
-        super().__init__()
-
-        assert isinstance(device, str)
-        assert isinstance(pretrained, str)
-        assert isinstance(batch_size, (int, str))
-
-        gpus = torch.cuda.device_count()
-        accelerator = Accelerator()
-
-        if not (parallelize or accelerator.num_processes > 1):
-            # use user-passed device
-            device_list = set(
-                ["cuda", "cpu"]
-                + [f"cuda:{i}" for i in range(torch.cuda.device_count())]
-                + ["mps", "mps:0"]
-            )
-            if device:
-                if device not in device_list:
-                    device = int(device)
-                self._device = torch.device(device)
-                eval_logger.info(f"Using device '{device}'")
-                if device in ("mps", "mps:0") and "dev" not in torch.__version__:
-                    eval_logger.info(
-                        "MPS: Setting dtype to float32. To use float16 with MPS, please install a nightly build of "
-                        "PyTorch: pip3 install --pre torch torchvision torchaudio --index-url "
-                        "https://download.pytorch.org/whl/nightly/cpu"
-                    )
-            else:
-                eval_logger.info("Device not specified")
-                eval_logger.info(f"Cuda Available? {torch.cuda.is_available()}")
-                self._device = (
-                    torch.device("cuda")
-                    if torch.cuda.is_available()
-                    else torch.device("cpu")
-                )
-        else:
-            if device != "cuda":
-                eval_logger.info(
-                    f"Using `accelerate launch` or `parallelize=True`, device '{device}' will be overridden when placing model."
-                )
-            # TODO: include in warning that `load_in_8bit` etc. affect this too
-            self._device = device
-
-        model_kwargs = {}
-        if parallelize:
-            model_kwargs = _get_accelerate_args(
-                device_map_option,
-                max_memory_per_gpu,
-                max_cpu_memory,
-                offload_folder,
-            )
-
-        # TODO: update this to be less of a hack once subfolder is fixed in HF
-        revision = revision + ("/" + subfolder if subfolder is not None else "")
-
-        self._config = transformers.AutoConfig.from_pretrained(
-            pretrained,
-            revision=revision,
-            trust_remote_code=trust_remote_code,
-        )
-        self._config.k_bits = k_bits
-        self._config.v_bits = v_bits
-        self._config.group_size = group_size
-        self._config.residual_length = residual_length
-        self._config.attention_dropout = 0.0
-        assert self._config.use_cache
-        if not gptq:
-            if load_in_4bit:
-                assert (
-                    transformers.__version__ >= "4.30.0"
-                ), "load_in_4bit requires transformers >= 4.30.0"
-            if transformers.__version__ >= "4.30.0":
-                model_kwargs["load_in_4bit"] = load_in_4bit
-                if load_in_4bit:
-                    if bnb_4bit_quant_type:
-                        model_kwargs["bnb_4bit_quant_type"] = bnb_4bit_quant_type
-                    if bnb_4bit_compute_dtype:
-                        model_kwargs["bnb_4bit_compute_dtype"] = utils.get_dtype(
-                            bnb_4bit_compute_dtype
-                        )
-            self._model = LlamaForCausalLM_KIVI.from_pretrained(
-                pretrained,
-                cache_dir=cache_dir,
-                revision=revision,
-                config=self._config,
-                torch_dtype=utils.get_dtype(dtype),
-                low_cpu_mem_usage=low_cpu_mem_usage,
-                trust_remote_code=trust_remote_code,
-                load_in_8bit=load_in_8bit,
-                **model_kwargs,
-            )
-        else:
-            raise NotImplementedError
-        # forever after, access self._model through self.model property
-        self.model.eval()
-        self.model.tie_weights()
-        if gpus <= 1 and not parallelize:
-            # place model onto device, if not using HF Accelerate in any form
-            try:
-                self.model.to(self.device)
-            except ValueError:
-                eval_logger.info(
-                    "Failed to place model onto specified device. This may be because the model is quantized via `bitsandbytes`. If the desired GPU is being used, this message is safe to ignore."
-                )
-
-        self.tokenizer = transformers.AutoTokenizer.from_pretrained(
-            pretrained if tokenizer is None else tokenizer,
-            revision=revision,
-            trust_remote_code=trust_remote_code,
-            use_fast=use_fast_tokenizer,
-        )
-
-        self.truncation = truncation
-
-        self.vocab_size = self.tokenizer.vocab_size
-        if self.tokenizer.pad_token:
-            pass
-        elif self.tokenizer.unk_token is not None:
-            self.tokenizer.pad_token_id = self.tokenizer.unk_token_id
-        elif self.tokenizer.eos_token is not None:
-            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-
-        self._max_length = max_length
-
-        self.batch_schedule = 1
-        self.batch_sizes = {}
-        self.max_batch_size = max_batch_size
-
-        if str(batch_size).startswith("auto"):
-            batch_size = batch_size.split(":")
-            self.batch_size_per_gpu = batch_size[0]
-            self.batch_schedule = float(batch_size[1]) if len(batch_size) > 1 else 1
-        else:
-            self.batch_size_per_gpu = int(batch_size)
-
-        # multigpu data-parallel support when launched with accelerate
-        if gpus > 1:
-            if parallelize:
-                if accelerator.num_processes > 1:
-                    raise RuntimeError(
-                        "Attempted to use both a HF Accelerate `device_map` and to launch via `accelerate launch`. If this is the case, please either remove `parallelize=True` from --model_args or launch outside of the Accelerate launcher."
-                    )
-                else:
-                    pass
-            elif gpus > accelerator.num_processes:
-                # TODO: make sure there's still never an edge case where we unintentionally default to CPU
-                eval_logger.warning(
-                    "WARNING: The number of total system GPUs does not match the number of spawned processes. "
-                    "If you would like to use data parallelism, please launch the script "
-                    "with 'accelerate launch *script*'. "
-                    f"Current run will proceed with {accelerator.num_processes} devices."
-                )
-                self._rank = accelerator.local_process_index
-                self._world_size = accelerator.num_processes
-                # manually set model to use gpu, for case where many GPUs available but
-                # only seek to use one
-                self._device = (
-                    torch.device(f"cuda:{accelerator.local_process_index}")
-                    if torch.cuda.is_available()
-                    else torch.device("cpu")
-                )
-                try:
-                    self.model.to(self.device)
-                except ValueError:
-                    eval_logger.info(
-                        "Failed to place model onto specified device. This may be because the model is quantized via `bitsandbytes`. If the desired GPU is being used, this message is safe to ignore."
-                    )
-            else:
-                assert accelerator.distributed_type in [
-                    DistributedType.FSDP,
-                    DistributedType.MULTI_GPU,
-                ], "Unsupported distributed type provided. Only DDP and FSDP are supported."
-                if accelerator.distributed_type == DistributedType.FSDP:
-                    self._model = accelerator.prepare(self.model)
-                else:
-                    self._model = accelerator.prepare_model(
-                        self.model, evaluation_mode=True
-                    )
-                self._device = torch.device(f"cuda:{accelerator.local_process_index}")
-                self.accelerator = accelerator
-
-                if self.accelerator.is_local_main_process:
-                    eval_logger.info(f"Using {gpus} devices with data parallelism")
-
-                self._rank = self.accelerator.local_process_index
-                self._world_size = self.accelerator.num_processes

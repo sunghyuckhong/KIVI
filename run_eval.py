@@ -31,16 +31,19 @@ from lm_eval import simple_evaluate, utils
 DEFAULT_MODEL_PATH = "mistralai/Mistral-7B-Instruct-v0.2"
 
 TASK_CFG = {
-    "gsm8k": dict(tasks=["gsm8k"], num_fewshot=5),
+    "gsm8k_32k": dict(tasks=["gsm8k_32k"], num_fewshot=5),
     "gsm8k_zeroshot": dict(tasks=["gsm8k"], num_fewshot=0),
     "gsm8k_cot_zeroshot": dict(tasks=["gsm8k_cot_zeroshot"]),
     "gsm8k_cot": dict(tasks=["gsm8k_cot"]),
     "coqa":  dict(tasks=["coqa"], num_fewshot=0),
     "truthfulqa_mc1": dict(tasks=["truthfulqa_mc1"], num_fewshot=0),
     "truthfulqa_gen": dict(tasks=["truthfulqa_gen"], num_fewshot=0),
-    "gpqa":  dict(tasks=["gpqa_diamond_cot_n_shot"]),
+    "gpqa_diamond_cot_n_shot_32k": dict(tasks=["gpqa_diamond_cot_n_shot_32k"]),
     "gpqa_diamond_cot_zeroshot": dict(tasks=["gpqa_diamond_cot_zeroshot"]),
-    "math500":  dict(tasks=["math500"]),
+    "math500_32k":  dict(tasks=["math500_32k"]),
+    "aime":    dict(tasks=["aime"]),
+    "aime24":  dict(tasks=["aime24"]),
+    "aime25":  dict(tasks=["aime25"]),
 }
 
 
@@ -49,7 +52,7 @@ def parse_args():
     p.add_argument("--model",      choices=["fp16", "kivi", "pertoken", "fp8", "smoothkv"], required=True)
     p.add_argument("--calib_path", type=str, default=None,
                    help="Path to SmoothKV calibration .pt file (required when --model=smoothkv)")
-    p.add_argument("--task",       choices=["gsm8k", "gsm8k_zeroshot", "gsm8k_cot", "gsm8k_cot_zeroshot", "coqa", "truthfulqa_mc1", "truthfulqa_gen", "gpqa", "gpqa_diamond_cot_zeroshot", "math500"], required=True)
+    p.add_argument("--task",       choices=["gsm8k_32k", "gsm8k_zeroshot", "gsm8k_cot", "gsm8k_cot_zeroshot", "coqa", "truthfulqa_mc1", "truthfulqa_gen", "gpqa_diamond_cot_n_shot_32k", "gpqa_diamond_cot_zeroshot", "math500_32k", "aime", "aime24", "aime25"], required=True)
     p.add_argument("--group_size", type=int, default=32,
                    help="Quantization group size along head_dim (32 or 128)")
     p.add_argument("--residual",   type=int, default=32,
@@ -59,6 +62,8 @@ def parse_args():
     p.add_argument("--model_path", type=str, default=DEFAULT_MODEL_PATH,
                    help="HuggingFace model path (default: Mistral-7B-Instruct-v0.2)")
     p.add_argument("--batch_size", type=int, default=16)
+    p.add_argument("--max_gen_toks", type=int, default=None,
+                   help="Per-run override for task generation_kwargs.max_gen_toks.")
     return p.parse_args()
 
 
@@ -213,18 +218,32 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, use_fast=False)
     lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=args.batch_size)
 
-    # Register custom MATH500 task so simple_evaluate can resolve it
-    from lm_eval.tasks import include_path
+    # Register custom MATH500 task. The API differs between lm-eval versions:
+    #   * paper env (commit c9bbec6e): include_path is a module-level function
+    #   * modern env (0.4.2): include_path is a TaskManager method, and the
+    #     TaskManager must be passed to simple_evaluate for it to see the task.
+    math500_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks", "math500")
+    tm = None
     try:
-        include_path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks", "math500"))
-    except Exception as e:
-        print(f"[warn] include_path math500 failed: {e}")
+        from lm_eval.tasks import include_path as _include_path
+        _include_path(math500_dir)
+    except (ImportError, AttributeError):
+        try:
+            from lm_eval.tasks import TaskManager
+            tm = TaskManager(include_path=math500_dir)
+        except Exception as e:
+            print(f"[warn] include_path math500 failed: {e}")
 
+    kwargs = dict(**TASK_CFG[args.task])
+    if tm is not None:
+        kwargs["task_manager"] = tm
+    if args.max_gen_toks is not None:
+        kwargs["gen_kwargs"] = f"max_gen_toks={args.max_gen_toks}"
     results = simple_evaluate(
         model=lm,
         batch_size=args.batch_size,
         log_samples=False,
-        **TASK_CFG[args.task],
+        **kwargs,
     )
 
     print(utils.make_table(results))

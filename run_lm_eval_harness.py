@@ -5,8 +5,19 @@ import json
 import torch
 
 from lm_eval import evaluator, utils
-from lm_eval.tasks import initialize_tasks, include_path
-from lm_eval.api.registry import ALL_TASKS
+# API differs between lm-eval versions:
+#   * paper env c9bbec6e: initialize_tasks() + include_path() module funcs; ALL_TASKS registry
+#   * paper_env_fast 0.4.2: TaskManager(include_path=...) passed to simple_evaluate
+try:
+    from lm_eval.tasks import initialize_tasks, include_path
+    from lm_eval.api.registry import ALL_TASKS
+    _USE_OLD_TASKS_API = True
+except ImportError:
+    from lm_eval.tasks import TaskManager
+    initialize_tasks = None
+    include_path = None
+    ALL_TASKS = None
+    _USE_OLD_TASKS_API = False
 
 from utils_paper.process_args import process_args
 from utils_paper.data import set_seed
@@ -69,14 +80,20 @@ def _method_tag(args):
         tag_extra = ""
         if args.calib_path:
             import re
-            a  = re.search(r"_a(\d+(?:\.\d+)?)",      args.calib_path)
-            b  = re.search(r"_b(\d+(?:\.\d+)?)",      args.calib_path)
-            pK = re.search(r"_pK(\d+p?\d*)",          args.calib_path)
-            pV = re.search(r"_pV(\d+p?\d*)",          args.calib_path)
-            if a:  tag_extra += f"_a{a.group(1)}"
-            if b:  tag_extra += f"_b{b.group(1)}"
-            if pK: tag_extra += f"_pK{pK.group(1)}"
-            if pV: tag_extra += f"_pV{pV.group(1)}"
+            a    = re.search(r"_a(\d+(?:\.\d+)?)",    args.calib_path)
+            b    = re.search(r"_b(\d+(?:\.\d+)?)",    args.calib_path)
+            pair = re.search(r"_pairK(\d+p?\d*)",     args.calib_path)
+            pK   = re.search(r"(?<!pair)_pK(\d+p?\d*)", args.calib_path)
+            pV   = re.search(r"_pV(\d+p?\d*)",        args.calib_path)
+            # α/β variants can carry a "_pair" suffix indicating pair-max s_K
+            alpha_pair = bool(re.search(r"_a\d+(?:\.\d+)?(?:_b\d+(?:\.\d+)?)?_pair(?!K)",
+                                        args.calib_path))
+            if a:    tag_extra += f"_a{a.group(1)}"
+            if b:    tag_extra += f"_b{b.group(1)}"
+            if alpha_pair: tag_extra += "_pair"
+            if pair: tag_extra += f"_pairK{pair.group(1)}"
+            elif pK: tag_extra += f"_pK{pK.group(1)}"
+            if pV:   tag_extra += f"_pV{pV.group(1)}"
         return f"_smoothkvpaper_g{args.group_size}{tag_extra}"
     return f"_{m}"
 
@@ -169,14 +186,20 @@ if __name__ == "__main__":
             restore()
 
     if data_args.tasks is not None:
-        initialize_tasks()
-        # Register custom tasks (MATH500, etc.) shipped with this repo
-        try:
-            include_path(os.path.join(os.path.dirname(__file__), "tasks", "math500"))
-        except Exception as e:
-            print(f"[warn] include_path tasks/math500 failed: {e}")
+        math500_dir = os.path.join(os.path.dirname(__file__), "tasks", "math500")
+        tm = None
+        if _USE_OLD_TASKS_API:
+            initialize_tasks()
+            try:
+                include_path(math500_dir)
+            except Exception as e:
+                print(f"[warn] include_path tasks/math500 failed: {e}")
+            all_names = ALL_TASKS
+        else:
+            tm = TaskManager(include_path=math500_dir)
+            all_names = tm.all_tasks
         tasks_list = data_args.tasks.split(",")
-        task_names = utils.pattern_match(tasks_list, ALL_TASKS)
+        task_names = utils.pattern_match(tasks_list, all_names)
         for task in [task for task in tasks_list if task not in task_names]:
             if os.path.isfile(task):
                 config = utils.load_yaml_config(task)
@@ -189,10 +212,16 @@ if __name__ == "__main__":
                 f"Tasks {', '.join(task_missing)} were not found. "
                 "Try `lm-eval --tasks list` for list of available tasks."
             )
-        results = evaluator.simple_evaluate(
-            model=model, tasks=task_names, log_samples=False,
-        )
-        print(evaluator.make_table(results))
+        eval_kwargs = dict(model=model, tasks=task_names, log_samples=False)
+        if tm is not None:
+            eval_kwargs["task_manager"] = tm
+        if data_args.max_gen_toks is not None:
+            # simple_evaluate accepts gen_kwargs as "k=v,k=v" string
+            eval_kwargs["gen_kwargs"] = f"max_gen_toks={data_args.max_gen_toks}"
+        results = evaluator.simple_evaluate(**eval_kwargs)
+        # make_table lives in evaluator (c9bbec6e) or utils (0.4.2)
+        _make_table = getattr(evaluator, "make_table", None) or utils.make_table
+        print(_make_table(results))
 
         os.makedirs("logs", exist_ok=True)
         model_short = model_args.model_name_or_path.rstrip("/").split("/")[-1].lower()

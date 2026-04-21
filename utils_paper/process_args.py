@@ -118,6 +118,11 @@ class DataArguments:
         default=True,
         metadata={"help": "Whether to use our KV cache quantization implementation."},
     )
+    max_gen_toks: Optional[int] = field(
+        default=None,
+        metadata={"help": "Per-run override for task generation_kwargs.max_gen_toks. "
+                          "None means use whatever the task.yaml specifies (or HFLM default 256)."},
+    )
 
 
 
