@@ -40,6 +40,7 @@ def parse_args():
     p.add_argument("--batch_size",  type=int, default=1, help="lm_eval batch_size (vLLM handles internal batching)")
     p.add_argument("--max_gen_toks", type=int, default=None)
     p.add_argument("--tp",          type=int, default=1, help="tensor parallel size")
+    p.add_argument("--limit",       type=int, default=None, help="limit eval to N samples (bench/debug)")
     return p.parse_args()
 
 
@@ -89,6 +90,8 @@ def main():
     # Imports after patching so the vLLM model registry uses the patched forward
     from lm_eval import simple_evaluate, utils as lm_utils
     from lm_eval.models.vllm_causallms import VLLM
+    from lm_eval.tasks import TaskManager
+    tm = TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks"))
 
     print(f"\n{'='*60}")
     print(f"  [vLLM] model={args.model}  task={args.task}  path={args.model_path}")
@@ -114,6 +117,8 @@ def main():
         batch_size=args.batch_size,
         log_samples=False,
         gen_kwargs=gen_kwargs,
+        task_manager=tm,
+        limit=args.limit,
     )
     print(lm_utils.make_table(results))
 

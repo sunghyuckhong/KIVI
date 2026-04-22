@@ -21,6 +21,6 @@ tmux new-window -t kivi: -n "$name" \
    export HF_TOKEN=${HF_TOKEN:?set HF_TOKEN before running} CUDA_VISIBLE_DEVICES=$gpu; \
    ( $cmd ) 2>&1 | tee logs/run_out/$name.log; \
    rc=\${PIPESTATUS[0]}; \
-   if [ \"\$rc\" -eq 0 ]; then echo DONE_$name; else echo FAIL_$name (rc=\$rc); fi; \
+   if [ \"\$rc\" -eq 0 ]; then echo DONE_$name; else echo \"FAIL_$name rc=\$rc\"; fi; \
    read"
 echo "launched $name on GPU$gpu (tmux window)"

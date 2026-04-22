@@ -17,6 +17,7 @@ Usage:
 import torch
 
 import vllm.model_executor.models.llama as _vllm_llama
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm_custom.fake_quant_utils import (
     fake_quantize_fp8,
     fake_quantize_k_perchannel,
@@ -26,6 +27,7 @@ from vllm_custom.fake_quant_utils import (
 
 
 _ORIG_FORWARD = None
+_ORIG_INIT = None
 
 
 def _ensure_original_saved():
@@ -34,11 +36,42 @@ def _ensure_original_saved():
         _ORIG_FORWARD = _vllm_llama.LlamaAttention.forward
 
 
+def _install_layer_idx_hook():
+    """Patch LlamaAttention.__init__ to stash `self._kivi_layer_idx`.
+
+    vLLM 0.6.6 passes `prefix="model.layers.N.self_attn"` to __init__ but
+    doesn't store it on the instance. SmoothKV needs per-layer scales, so we
+    hook __init__ to save the parsed layer index before the LLM builds layers.
+    """
+    global _ORIG_INIT
+    if _ORIG_INIT is not None:
+        return  # already installed
+    _ORIG_INIT = _vllm_llama.LlamaAttention.__init__
+
+    def patched_init(self, *args, **kwargs):
+        _ORIG_INIT(self, *args, **kwargs)
+        prefix = kwargs.get("prefix", "")
+        if not prefix and args:
+            # prefix is the last positional arg when passed positionally
+            last = args[-1]
+            if isinstance(last, str):
+                prefix = last
+        try:
+            self._kivi_layer_idx = extract_layer_index(prefix)
+        except Exception:
+            self._kivi_layer_idx = None
+
+    _vllm_llama.LlamaAttention.__init__ = patched_init
+
+
 def restore():
     """Undo any patch applied by install_*."""
-    global _ORIG_FORWARD
+    global _ORIG_FORWARD, _ORIG_INIT
     if _ORIG_FORWARD is not None:
         _vllm_llama.LlamaAttention.forward = _ORIG_FORWARD
+    if _ORIG_INIT is not None:
+        _vllm_llama.LlamaAttention.__init__ = _ORIG_INIT
+        _ORIG_INIT = None
 
 
 def install_fp8(group_size: int = 128):
@@ -83,34 +116,22 @@ def install_smoothkv(calib_path: str, group_size: int = 128, bits: int = 4):
     calib_path: path to the .pt file produced by scripts/make_*_variants.py.
     """
     _ensure_original_saved()
+    _install_layer_idx_hook()
 
     calib = torch.load(calib_path, weights_only=True)
     # calib layout: {"s_K": tensor[L, nh, D], "s_V": tensor[L, nh, D], ...}
     s_K_all = calib["s_K"].to(torch.float16).cuda()  # (num_layers, num_kv_heads, head_dim)
     s_V_all = calib["s_V"].to(torch.float16).cuda()
 
-    # Map layer index → s_K and s_V tensors, keyed by module id
-    _layer_scales = {}
-
     def _get_scales(self):
-        """Derive layer index from the attention module's prefix name."""
-        # vLLM's LlamaAttention sets self.prefix to e.g. "model.layers.12.self_attn.attn"
-        key = id(self)
-        if key in _layer_scales:
-            return _layer_scales[key]
-        # Walk up: prefix is stored on self.attn.prefix
-        pfx = getattr(self.attn, "prefix", None) or getattr(self, "prefix", "")
-        # parse layer idx
-        try:
-            import re
-            m = re.search(r"layers\.(\d+)\.", pfx)
-            layer_idx = int(m.group(1))
-            sk = s_K_all[layer_idx]  # (num_kv_heads, D)
-            sv = s_V_all[layer_idx]
-            _layer_scales[key] = (sk, sv)
-            return sk, sv
-        except Exception as e:
-            raise RuntimeError(f"Failed to find layer idx from prefix={pfx!r}: {e}")
+        """Layer idx is stored by the __init__ hook as self._kivi_layer_idx."""
+        layer_idx = getattr(self, "_kivi_layer_idx", None)
+        if layer_idx is None:
+            raise RuntimeError(
+                "SmoothKV: layer index unset. The __init__ hook must run before "
+                "model construction — call install_smoothkv() before LLM(...)."
+            )
+        return s_K_all[layer_idx], s_V_all[layer_idx]
 
     def smoothkv_forward(self, positions, hidden_states, kv_cache, attn_metadata):
         qkv, _ = self.qkv_proj(hidden_states)
