@@ -38,10 +38,15 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # PRESET TABLE (measured on 80 GB GPU with vLLM 0.6.6, gpu_util=0.70)
 # ─────────────────────────────────────────────────────────────────────────────
-# Preset            | model                                 | ctx native | MG    | max_model_len | max_num_seqs | batch_size
-# llama3-instruct   | meta-llama/Meta-Llama-3-8B-Instruct   | 8192       | 4096  | 8192          | 32           | 32
-# mistral-instruct  | mistralai/Mistral-7B-Instruct-v0.2    | 32768      | 16384 | 19456         | 14           | 14
-# dsr1-llama-8b     | deepseek-ai/DeepSeek-R1-Distill-Llama-8B | 131072  | 32768 | 36864         | 7            | 7
+# Preset            | model                                 | ctx native | MG    | max_num_seqs | batch_size
+# llama3-instruct   | meta-llama/Meta-Llama-3-8B-Instruct   | 8192       | 4096  | 128          | 128
+# mistral-instruct  | mistralai/Mistral-7B-Instruct-v0.2    | 32768      | 16384 | 8            | 128
+# dsr1-llama-8b     | deepseek-ai/DeepSeek-R1-Distill-Llama-8B | 131072  | 32768 | 2            | 128
+#
+# max_model_len is NOT set — vLLM uses native ctx. Output length is controlled via --max_gen_toks.
+# max_num_seqs sized to real KV-cache ceiling at native ctx (280k token slots / native ctx).
+# batch_size must be ≥ task item count so lm_eval submits the full task in one generate()
+# call — under-sized batch_size drains vLLM's continuous batching between submits (20× slower).
 #
 # Prompt-length source-of-truth: scripts/measure_prompt_lens.py
 # (gsm8k max 1404, gpqa max 2798, math500 max 1373 — all under 3k).
@@ -58,25 +63,25 @@ ARGS=$4
 OUT_STEM=$5
 TASKS="${TASKS:-gsm8k_32k gpqa_diamond_cot_n_shot_32k math500_32k}"
 
-# Preset → (MODEL, MG, MAX_LEN, MAX_NS)
+# Preset → (MODEL, MG, MAX_NS)
 case "$PRESET" in
   llama3-instruct)
     MODEL=meta-llama/Meta-Llama-3-8B-Instruct
     MG=4096
-    MAX_LEN=8192
-    MAX_NS=32
+    MAX_NS=128      # Llama3 ctx 8k — per-task max_len savings are tiny, stay at native
+    USE_TASK_LEN=0
     ;;
   dsr1-llama-8b)
     MODEL=deepseek-ai/DeepSeek-R1-Distill-Llama-8B
     MG=32768
-    MAX_LEN=36864   # max prompt 2798 + 32768 gen + buffer, rounded to 144*256
-    MAX_NS=7        # 280k token slots / 36864 ≈ 7.6 → 7 safe
+    MAX_NS=8        # at per-task max_model_len ≈ 34-36k: 280k / 35k ≈ 8
+    USE_TASK_LEN=1
     ;;
   mistral-instruct)
     MODEL=mistralai/Mistral-7B-Instruct-v0.2
-    MG=16384        # ctx 32768, ≤ 32768 rule → MG = ctx/2
-    MAX_LEN=19456   # max prompt 2798 + 16384 gen + buffer, rounded to 76*256
-    MAX_NS=14       # 280k / 19456 ≈ 14.4 → 14 safe
+    MG=16384        # ctx 32768, rule: ≤ 32768 → MG = ctx/2
+    MAX_NS=15       # at per-task max_model_len ≈ 18-19k: 280k / 19k ≈ 14.7
+    USE_TASK_LEN=1
     ;;
   *)
     echo "Unknown preset: $PRESET" >&2
@@ -88,12 +93,31 @@ esac
 export CUDA_VISIBLE_DEVICES=$GPU
 VLLM=/opt/vllm_env/bin/python
 LOG=logs/run_out/${STREAM}_vllm.log
-BS=$MAX_NS  # batch_size = max_num_seqs (see note 4 above)
+BS=128      # lm_eval batch_size — must submit whole task in one generate() so vLLM's
+            # continuous batching keeps max_num_seqs slots full (not batch-by-batch drain).
+            # All current tasks ≤ 1319 items; 128 covers it with typical short-sequence fanout.
+
+# Per-task max_model_len (measured via scripts/measure_prompt_lens.py):
+#   gsm8k_32k max prompt = 1404, gpqa = 2798, math500 = 1373.
+# max_model_len = max_prompt + max_gen_toks, rounded up to 256-multiple.
+task_max_len() {
+  local t=$1 mg=$2
+  local prompt
+  case "$t" in
+    gsm8k_32k)                    prompt=1404 ;;
+    gpqa_diamond_cot_n_shot_32k)  prompt=2798 ;;
+    math500_32k)                  prompt=1373 ;;
+    *)                            prompt=4096 ;;  # conservative default for unknown task
+  esac
+  local total=$((prompt + mg))
+  # round up to 256-multiple
+  echo $(( (total + 255) / 256 * 256 ))
+}
 
 {
   echo "=== $STREAM @ $(date) on GPU$GPU (preset=$PRESET) ==="
   echo "  MODEL=$MODEL"
-  echo "  max_model_len=$MAX_LEN  max_num_seqs=$MAX_NS  batch_size=$BS  max_gen_toks=$MG"
+  echo "  max_num_seqs=$MAX_NS  batch_size=$BS  max_gen_toks=$MG  per-task-max-len=$USE_TASK_LEN"
   echo "  method_args: $ARGS"
   rc=0
   for t in $TASKS; do
@@ -103,9 +127,15 @@ BS=$MAX_NS  # batch_size = max_num_seqs (see note 4 above)
       continue
     fi
     echo "--- RUN $t ---"
+    extra_args=()
+    if [ "$USE_TASK_LEN" = "1" ]; then
+      maxlen=$(task_max_len "$t" "$MG")
+      echo "   max_model_len=$maxlen (per-task)"
+      extra_args+=(--max_model_len "$maxlen")
+    fi
     $VLLM run_eval_vllm.py --model_path "$MODEL" $ARGS \
         --task $t --max_gen_toks $MG --batch_size $BS \
-        --max_model_len $MAX_LEN --max_num_seqs $MAX_NS
+        --max_num_seqs $MAX_NS "${extra_args[@]}"
     rc=$?
     [ $rc -ne 0 ] && break
   done
