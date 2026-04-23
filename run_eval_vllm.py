@@ -41,6 +41,9 @@ def parse_args():
     p.add_argument("--max_gen_toks", type=int, default=None)
     p.add_argument("--tp",          type=int, default=1, help="tensor parallel size")
     p.add_argument("--limit",       type=int, default=None, help="limit eval to N samples (bench/debug)")
+    p.add_argument("--max_model_len", type=int, default=None,
+                   help="vLLM max context. If unset, vLLM uses the model's native max_position_embeddings.")
+    p.add_argument("--max_num_seqs",  type=int, default=128, help="vLLM concurrency slots")
     return p.parse_args()
 
 
@@ -100,12 +103,19 @@ def main():
     print(f"  output → {out_path}")
     print(f"{'='*60}\n")
 
-    lm = VLLM(
+    vllm_kwargs = dict(
         pretrained=args.model_path,
         dtype="float16",
         tensor_parallel_size=args.tp,
-        batch_size=args.batch_size,
+        batch_size=args.batch_size,          # MUST equal max_num_seqs to saturate concurrency
+        gpu_memory_utilization=0.70,
+        max_num_seqs=args.max_num_seqs,
+        enforce_eager=False,
+        enable_prefix_caching=True,          # 5-shot prompts share a long prefix
     )
+    if args.max_model_len is not None:
+        vllm_kwargs["max_model_len"] = args.max_model_len
+    lm = VLLM(**vllm_kwargs)
 
     gen_kwargs = None
     if args.max_gen_toks is not None:

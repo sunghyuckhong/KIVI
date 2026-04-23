@@ -9,6 +9,7 @@ out_*
 *.sh
 !wait_and_report.sh
 !run_all.sh
+!scripts/launch_vllm_reasoning.sh
 *.jsonl
 *.pt
 notebook
