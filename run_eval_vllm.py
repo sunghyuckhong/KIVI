@@ -112,6 +112,9 @@ def main():
         max_num_seqs=args.max_num_seqs,
         enforce_eager=False,
         enable_prefix_caching=True,          # 5-shot prompts share a long prefix
+        disable_log_stats=False,             # emit periodic "Running/Swapped/GPU KV cache usage"
+                                             # so we can verify no preemption. LLM entrypoint
+                                             # defaults this to True which hides the signal.
     )
     if args.max_model_len is not None:
         vllm_kwargs["max_model_len"] = args.max_model_len
