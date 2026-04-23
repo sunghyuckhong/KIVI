@@ -37,8 +37,16 @@ def parse_args():
                    help="V-side scaling power")
     p.add_argument("--dataset", type=str,
                    default="neuralmagic/LLM_compression_calibration")
+    p.add_argument("--dataset_config", type=str, default=None,
+                   help="HF config name (e.g. 'wikitext-2-raw-v1' for 'wikitext'). Optional.")
     p.add_argument("--split", type=str, default="train")
-    p.add_argument("--text_column", type=str, default="text")
+    p.add_argument("--text_column", type=str, default="text",
+                   help="Single column with the text. Ignored if --text_columns is set.")
+    p.add_argument("--text_columns", nargs="+", type=str, default=None,
+                   help="Concatenate multiple columns (e.g. 'problem solution') "
+                        "joined by --text_join into one calibration sample.")
+    p.add_argument("--text_join", type=str, default="\n\n",
+                   help="Separator used when joining --text_columns.")
     p.add_argument("--output", type=str, required=True)
     p.add_argument("--device", type=str, default="cuda:0")
     p.add_argument("--max_batches_before_summary", type=int, default=32,
@@ -235,12 +243,20 @@ def main():
     hooks = install_hooks(model, collector)
 
     print(f"Loading dataset: {args.dataset}")
-    ds = load_dataset(args.dataset, split=args.split)
+    if args.dataset_config:
+        ds = load_dataset(args.dataset, args.dataset_config, split=args.split)
+    else:
+        ds = load_dataset(args.dataset, split=args.split)
 
     print(f"Calibrating on {args.num_samples} samples at {args.seq_length} tokens...")
     with torch.no_grad():
         for i in tqdm(range(min(args.num_samples, len(ds)))):
-            text = ds[i][args.text_column]
+            row = ds[i]
+            if args.text_columns:
+                parts = [str(row[c]) for c in args.text_columns if row.get(c)]
+                text = args.text_join.join(parts)
+            else:
+                text = row[args.text_column]
             if not text or not text.strip():
                 continue
             enc = tokenizer(text, return_tensors="pt",
