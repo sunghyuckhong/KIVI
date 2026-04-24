@@ -1,15 +1,16 @@
 #!/bin/bash
-# Full eval for Llama-3-8B base (meta-llama/Meta-Llama-3-8B):
+# Full eval for Llama-3-8B-Instruct (meta-llama/Meta-Llama-3-8B-Instruct):
 # 1. SmoothKV calibration (~30 min, 1 GPU, other GPUs idle)
 # 2. Generate pair-mergeable variants (α=0.75 pair, pairK90/95/99/99p9)
 # 3. Run 9 methods × 5 tasks via run_eval.py (modern_env for transformers 4.43+).
 # max_gen_toks: 256 for TQA/CoQA (HFLM default), 4096 for reasoning (half of 8k context).
 set -u
-cd /workspace/KIVI
+# Pod-specific repo root (override with REPO_ROOT env var if different)
+cd "${REPO_ROOT:-/home/home-mcl/sunghyuck/kv_cache_compression/KIVI}"
 export HF_TOKEN=${HF_TOKEN:?set HF_TOKEN before running}
 MODERN=/opt/modernenv/bin/python
-MODEL=meta-llama/Meta-Llama-3-8B
-MODEL_SHORT=meta-llama-3-8b
+MODEL=meta-llama/Meta-Llama-3-8B-Instruct
+MODEL_SHORT=meta-llama-3-8b-instruct
 MAX_GEN_REASONING=4096
 
 is_free() {

@@ -1,6 +1,6 @@
 import math
 import warnings
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -12,6 +12,74 @@ from quant.matmul import cuda_bmm_fA_qB_outer
 from transformers.models.llama.configuration_llama import *
 from transformers.models.llama.modeling_llama import *
 from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
+
+
+# transformers 4.57+ no longer exports _get_unpad_data from modeling_llama.
+# Define locally to keep the KIVI flash path working across versions.
+def _get_unpad_data(attention_mask):
+    seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
+    indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
+    max_seqlen_in_batch = seqlens_in_batch.max().item()
+    cu_seqlens = F.pad(torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.int32), (1, 0))
+    return indices, cu_seqlens, max_seqlen_in_batch
+
+
+# flash_attn helpers (Mistral kivi imports these explicitly; Llama historically
+# relied on transformers re-exports, which 4.57 no longer provides).
+try:
+    from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa: F401
+except ImportError:
+    index_first_axis = pad_input = unpad_input = None
+
+# transformers 4.50+ restricted __all__ in modeling_llama to only top-level
+# classes. Helpers (LlamaRotaryEmbedding, LlamaRMSNorm, LlamaMLP,
+# apply_rotary_pos_emb, repeat_kv, etc.) are no longer re-exported via *.
+# Pull them from the full module explicitly.
+import transformers.models.llama.modeling_llama as _llm
+for _name in (
+    "LlamaRotaryEmbedding", "LlamaRMSNorm", "LlamaMLP",
+    "LlamaDecoderLayer", "LlamaAttention", "LlamaFlashAttention2",
+    "LlamaSdpaAttention", "apply_rotary_pos_emb", "repeat_kv",
+    "LlamaLinearScalingRotaryEmbedding", "LlamaDynamicNTKScalingRotaryEmbedding",
+):
+    if hasattr(_llm, _name):
+        globals()[_name] = getattr(_llm, _name)
+del _llm, _name
+
+try:
+    DynamicCache  # type: ignore[name-defined]
+except NameError:
+    try:
+        from transformers.cache_utils import DynamicCache  # noqa: F401
+    except ImportError:
+        DynamicCache = type("DynamicCache", (), {})  # dummy fallback
+
+# transformers >=4.50 removed symbols from modeling_llama's re-export list.
+# Pull them from their new homes.
+try:
+    add_start_docstrings_to_model_forward  # type: ignore[name-defined]
+except NameError:
+    from transformers.utils import add_start_docstrings_to_model_forward  # noqa: F401
+try:
+    LLAMA_INPUTS_DOCSTRING  # type: ignore[name-defined]
+except NameError:
+    LLAMA_INPUTS_DOCSTRING = ""
+try:
+    BaseModelOutputWithPast  # type: ignore[name-defined]
+except NameError:
+    from transformers.modeling_outputs import BaseModelOutputWithPast  # noqa: F401
+try:
+    CausalLMOutputWithPast  # type: ignore[name-defined]
+except NameError:
+    from transformers.modeling_outputs import CausalLMOutputWithPast  # noqa: F401
+try:
+    replace_return_docstrings  # type: ignore[name-defined]
+except NameError:
+    from transformers.utils import replace_return_docstrings  # noqa: F401
+try:
+    CrossEntropyLoss  # type: ignore[name-defined]
+except NameError:
+    from torch.nn import CrossEntropyLoss  # noqa: F401
 
 _CONFIG_FOR_DOC = "LlamaConfig"
 
@@ -377,9 +445,11 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
             value_states_full = torch.cat([value_states_full, value_states], dim=2)
             value_full_length = value_states_full.shape[-2]
             if value_states_quant is None:
-                attn_output = torch.matmul(attn_weights, value_states_full)
+                # GQA fix: attn_weights has num_heads=32, value_states_full has num_kv_heads=8 for Llama-3.
+                # Must repeat V along the head dim before matmul.
+                attn_output = torch.matmul(attn_weights, repeat_kv(value_states_full, self.num_key_value_groups))
             else:
-                attn_output = cuda_bmm_fA_qB_outer(self.group_size, attn_weights[:, :, :, :-value_full_length], value_states_quant, 
+                attn_output = cuda_bmm_fA_qB_outer(self.group_size, attn_weights[:, :, :, :-value_full_length], value_states_quant,
                                                 value_scale, value_mn, self.v_bits)
                 attn_output += torch.matmul(attn_weights[:, :, :, -value_full_length:], repeat_kv(value_states_full, self.num_key_value_groups))
             attn_output = attn_output.transpose(1, 2).contiguous()
@@ -417,9 +487,13 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
                 query_states = query_states.to(target_dtype)
                 key_states = key_states.to(target_dtype)
                 value_states = value_states.to(target_dtype)
+            # Pass None for attention_mask → use flash_attn_func directly and
+            # skip the _upad_input path. _upad_input has GQA bugs (cu_seqlens_q
+            # shape mismatch on Llama-3, which uses num_kv_heads=8 vs num_heads=32).
+            # During generation the query is unpadded left-to-right anyway.
             attn_output = self._flash_attention_forward(
                 query_states.transpose(1, 2), key_states.transpose(1, 2),
-                value_states.transpose(1, 2), attention_mask, q_len, dropout=0.0
+                value_states.transpose(1, 2), None, q_len, dropout=0.0
             )
             # quantize
             if key_states.shape[-2] % self.residual_length != 0:
@@ -782,7 +856,12 @@ class LlamaModel_KIVI(LlamaPreTrainedModel):
         )
 
 
-class LlamaForCausalLM_KIVI(LlamaPreTrainedModel):
+try:
+    from transformers.generation import GenerationMixin as _GenerationMixin
+except ImportError:
+    class _GenerationMixin: pass
+
+class LlamaForCausalLM_KIVI(LlamaPreTrainedModel, _GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):
@@ -913,15 +992,22 @@ class LlamaForCausalLM_KIVI(LlamaPreTrainedModel):
             if len(past_key_values) == 0:
                 past_key_values = None
         if past_key_values is not None:
-            past_length = past_key_values[0][-1]
-            # Some generation methods already pass only the last input ID
-            if input_ids.shape[1] > past_length:
-                remove_prefix_length = past_length
+            # KIVI cache entry format:
+            # (k_quant_trans, k_full, k_scale, k_mn, v_quant, v_full, v_scale, v_mn, kv_seq_len)
+            # In transformers 4.57 empty converted caches may have None for kv_seq_len.
+            past_length = past_key_values[0][-1] if (past_key_values and past_key_values[0]) else None
+            if past_length is None:
+                # Treat as no prior cache: keep full input_ids.
+                past_key_values = None
             else:
-                # Default to old behavior: keep only final ID
-                remove_prefix_length = input_ids.shape[1] - 1
+                # Some generation methods already pass only the last input ID
+                if input_ids.shape[1] > past_length:
+                    remove_prefix_length = past_length
+                else:
+                    # Default to old behavior: keep only final ID
+                    remove_prefix_length = input_ids.shape[1] - 1
 
-            input_ids = input_ids[:, remove_prefix_length:]
+                input_ids = input_ids[:, remove_prefix_length:]
 
         position_ids = kwargs.get("position_ids", None)
         if attention_mask is not None and position_ids is None:

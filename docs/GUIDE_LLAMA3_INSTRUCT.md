@@ -29,29 +29,54 @@ git clone https://github.com/sunghyuckhong/KIVI.git
 cd KIVI
 git checkout pertoken-experiments   # commit 3db97bd or later
 export HF_TOKEN=<your_hf_token>
+# If your repo root is not /workspace/KIVI, set:
+export REPO_ROOT=$(pwd)
 ```
 
 ## Environment — you need ONE env with transformers 4.43+ and lm-eval 0.4.2+
 
+Pinned spec (from the original paper-matching setup):
 ```bash
-# Build /opt/modernenv (if not present)
 python3.10 -m venv /opt/modernenv
 /opt/modernenv/bin/pip install --upgrade pip setuptools wheel
 /opt/modernenv/bin/pip install --index-url https://download.pytorch.org/whl/cu118 torch==2.1.0
 /opt/modernenv/bin/pip install "transformers==4.43.1" "lm_eval==0.4.2" accelerate datasets sentencepiece "numpy<2"
 
-# Install KIVI's triton-based KV quant extension
 cd quant && /opt/modernenv/bin/pip install -e . && cd ..
+```
+
+**Tested-working drift (April 2026 pod):** `torch==2.4.0+cu121`, `transformers==4.57.6`,
+`lm_eval==0.4.x`, `flash_attn==2.8.3`. If modernenv has drifted to newer versions,
+the pipeline still works but requires matching CUDA_HOME when rebuilding kivi_gemv:
+
+```bash
+# If torch is cu121:
+cd quant && rm -f kivi_gemv*.so
+CUDA_HOME=/usr/local/cuda-12.1 PATH=/usr/local/cuda-12.1/bin:$PATH \
+    /opt/modernenv/bin/pip install -e . --no-build-isolation
+cd ..
+
+# flash_attn is not pulled in by default — install it for the FP16 path:
+CUDA_HOME=/usr/local/cuda-12.1 PATH=/usr/local/cuda-12.1/bin:$PATH \
+    /opt/modernenv/bin/pip install flash-attn==2.8.3 --no-build-isolation
 ```
 
 Sanity check:
 ```bash
 /opt/modernenv/bin/python -c "
-import torch, transformers, lm_eval
-print(f'torch={torch.__version__}  transformers={transformers.__version__}  lm_eval={lm_eval.__version__}')
-print(f'GPUs visible: {torch.cuda.device_count()}')
-import kivi_gemv; print('kivi_gemv OK')
+import torch, transformers, lm_eval, kivi_gemv
+print(f'torch={torch.__version__}  transformers={transformers.__version__}')
+print(f'GPUs visible: {torch.cuda.device_count()}  kivi_gemv OK')
 "
+```
+
+Smoke test end-to-end (~3 min):
+```bash
+CUDA_VISIBLE_DEVICES=0 /opt/modernenv/bin/python run_eval.py \
+    --model_path meta-llama/Meta-Llama-3-8B-Instruct \
+    --model fp16 --k_bits 16 --v_bits 16 \
+    --task truthfulqa_gen --batch_size 16
+# Should finish in ~3 min, write logs/truthfulqa_gen_meta-llama-3-8b-instruct_fp16_results.json
 ```
 
 ## Steps
@@ -178,9 +203,23 @@ and it's in `gen_kwargs` at `simple_evaluate()` time.
 - **Empty prompt error** (`IndexError: index -1 is out of bounds for dimension 1 with size 0`):
   You set `max_gen_toks` ≥ model context. Llama-3-8B has 8k context → max 4096 gen.
 - **OOM on gsm8k/math500**: lower `--batch_size` in the launcher.
-- **`kivi_gemv not found`**: you skipped `pip install -e quant/` inside modernenv.
+- **`kivi_gemv not found`** or `undefined symbol` on import: kivi_gemv was built against
+  a different torch ABI. Rebuild inside modernenv: `cd quant && rm -f kivi_gemv*.so &&
+  /opt/modernenv/bin/pip install -e . --no-build-isolation`. If torch is cu121 but
+  nvcc defaults to cu118, prepend `CUDA_HOME=/usr/local/cuda-12.1 PATH=/usr/local/cuda-12.1/bin:$PATH`.
+- **`ImportError: FlashAttention2 has been toggled on, but ... flash_attn seems to be not installed`**:
+  `run_eval.py` fp16 path hard-codes `attn_implementation="flash_attention_2"`. Install
+  `flash-attn==2.8.3` (see Environment section). If your GPU is pre-Ampere (V100 / sm_70),
+  you can't use flash-attn — edit `run_eval.py` fp16 branch to drop `attn_implementation`.
+- **`cd /workspace/KIVI: No such file or directory`** (in tmux windows): the launcher
+  scripts used to hardcode `/workspace/KIVI`. Current launchers default to
+  `/home/home-mcl/sunghyuck/kv_cache_compression/KIVI` and respect `REPO_ROOT` env var.
+  Set `REPO_ROOT=$(pwd)` before `bash scripts/phaseX_llama3_launch.sh`.
 - **No `_32k` tasks**: make sure `tasks/gsm8k/`, `tasks/gpqa/`, `tasks/math500/`,
   `tasks/aime/` all exist (they're in the repo, shouldn't be missing).
+- **HF_TOKEN not set** but `huggingface-cli login` already ran: the launcher requires
+  `HF_TOKEN` env var explicitly. Load it from the cli token file:
+  `export HF_TOKEN=$(cat ~/.cache/huggingface/token)`.
 
 ## Minimal test (skip full matrix)
 

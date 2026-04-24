@@ -125,14 +125,20 @@ def row(model, method, file_tmpl, paper_key_method=None, env="paper"):
     )
 
 
-def modern_file(model_short, method, g=None, bits=None, res=None, alpha=None):
+def modern_file(model_short, method, g=None, bits=None, res=None, alpha=None, calib_tag=None):
     """Build modern-env filename (run_eval.py output)."""
     if method == "fp16":
         return f"{{task}}_{model_short}_fp16_results.json"
     if method == "kivi":
         return f"{{task}}_{model_short}_kivi_res128_results.json"
+    if method == "pertoken":
+        return f"{{task}}_{model_short}_pertoken_int4_flat_noresidual_results.json"
+    if method == "fp8":
+        return f"{{task}}_{model_short}_fp8_g128_results.json"
     if method == "smoothkv":
-        return f"{{task}}_{model_short}_smoothkv_g128_results.json"
+        # post-fix: filenames include calib tag (see run_eval.py output_name)
+        tag = f"_{calib_tag}" if calib_tag else ""
+        return f"{{task}}_{model_short}_smoothkv_g128{tag}_results.json"
     return None
 
 
@@ -214,11 +220,30 @@ def collect_rows():
                    for t in ("coqa", "gsm8k", "truthfulqa_gen", "math500", "gpqa_diamond_cot_n_shot")):
                 rows.append(row(model, f"SmoothKV {pk_label} pair (mergeable)", f_tmpl, env="paper"))
 
-    # Modern-env instruct models (only FP16 / KIVI-2 / SmoothKV α=0.75)
-    for (model, short) in [(MI, mi), (L3, l3)]:
+    # Modern-env instruct models.
+    # For Mistral-Instruct: only FP16 / KIVI-2 / SmoothKV α=0.75 were run previously.
+    for (model, short) in [(MI, mi)]:
         rows.append(row(model, "FP16", modern_file(short, "fp16"), env="modern"))
         rows.append(row(model, "KIVI-2 (g=32,r=128)", modern_file(short, "kivi"), env="modern"))
         rows.append(row(model, "SmoothKV α=0.75", modern_file(short, "smoothkv"), env="modern"))
+
+    # For Llama-3-8B-Instruct: full 9-method matrix
+    for (model, short) in [(L3, l3)]:
+        rows.append(row(model, "FP16", modern_file(short, "fp16"), env="modern"))
+        rows.append(row(model, "KIVI-2 (g=32,r=128)", modern_file(short, "kivi"), env="modern"))
+        rows.append(row(model, "Naive INT4 per-token (g=128,r=0)",
+                        modern_file(short, "pertoken"), env="modern"))
+        rows.append(row(model, "DeepSeekFP8 per-token (g=128)",
+                        modern_file(short, "fp8"), env="modern"))
+        for calib_tag, method_label in [
+            ("perc_a0.75_pair", "SmoothKV α=0.75 pair (mergeable)"),
+            ("pairK90_pV90",    "SmoothKV p=90 pair (mergeable)"),
+            ("pairK95_pV95",    "SmoothKV p=95 pair (mergeable)"),
+            ("pairK99_pV99",    "SmoothKV p=99 pair (mergeable)"),
+            ("pairK99p9_pV99p9","SmoothKV p=99.9 pair (mergeable)"),
+        ]:
+            rows.append(row(model, method_label,
+                            modern_file(short, "smoothkv", calib_tag=calib_tag), env="modern"))
 
     return rows
 

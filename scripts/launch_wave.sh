@@ -13,11 +13,12 @@ gpu=$2
 shift 2
 cmd="$*"
 
-cd /workspace/KIVI
+REPO_ROOT="${REPO_ROOT:-/home/home-mcl/sunghyuck/kv_cache_compression/KIVI}"
+cd "$REPO_ROOT"
 mkdir -p logs/run_out
 
 tmux new-window -t kivi: -n "$name" \
-  "cd /workspace/KIVI; \
+  "cd $REPO_ROOT; \
    export HF_TOKEN=${HF_TOKEN:?set HF_TOKEN before running} CUDA_VISIBLE_DEVICES=$gpu; \
    ( $cmd ) 2>&1 | tee logs/run_out/$name.log; \
    rc=\${PIPESTATUS[0]}; \

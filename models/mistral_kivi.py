@@ -36,6 +36,52 @@ from transformers.models.mistral.configuration_mistral import *
 from transformers.models.mistral.modeling_mistral import *
 from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
 
+# transformers 4.50+ restricted __all__ in modeling_mistral. Pull helpers
+# explicitly from the full module (same pattern as llama_kivi.py).
+import transformers.models.mistral.modeling_mistral as _mm
+for _name in (
+    "MistralRotaryEmbedding", "MistralRMSNorm", "MistralMLP",
+    "MistralDecoderLayer", "MistralAttention", "MistralFlashAttention2",
+    "MistralSdpaAttention", "apply_rotary_pos_emb", "repeat_kv",
+):
+    if hasattr(_mm, _name):
+        globals()[_name] = getattr(_mm, _name)
+del _mm, _name
+
+# transformers >=4.50 compat: pull missing symbols from new homes.
+try:
+    is_flash_attn_2_available  # type: ignore[name-defined]
+except NameError:
+    from transformers.utils import is_flash_attn_2_available  # noqa: F401
+try:
+    add_start_docstrings_to_model_forward  # type: ignore[name-defined]
+except NameError:
+    from transformers.utils import add_start_docstrings_to_model_forward  # noqa: F401
+try:
+    add_start_docstrings  # type: ignore[name-defined]
+except NameError:
+    from transformers.utils import add_start_docstrings  # noqa: F401
+try:
+    replace_return_docstrings  # type: ignore[name-defined]
+except NameError:
+    from transformers.utils import replace_return_docstrings  # noqa: F401
+try:
+    MISTRAL_INPUTS_DOCSTRING  # type: ignore[name-defined]
+except NameError:
+    MISTRAL_INPUTS_DOCSTRING = ""
+try:
+    MISTRAL_START_DOCSTRING  # type: ignore[name-defined]
+except NameError:
+    MISTRAL_START_DOCSTRING = ""
+try:
+    BaseModelOutputWithPast  # type: ignore[name-defined]
+except NameError:
+    from transformers.modeling_outputs import BaseModelOutputWithPast  # noqa: F401
+try:
+    CausalLMOutputWithPast  # type: ignore[name-defined]
+except NameError:
+    from transformers.modeling_outputs import CausalLMOutputWithPast  # noqa: F401
+
 _CONFIG_FOR_DOC = "MistralConfig"
 
 if is_flash_attn_2_available():
@@ -923,7 +969,12 @@ class MistralModel_KIVI(MistralPreTrainedModel):
         )
 
 
-class MistralForCausalLM_KIVI(MistralPreTrainedModel):
+try:
+    from transformers.generation import GenerationMixin as _GenerationMixin
+except ImportError:
+    class _GenerationMixin: pass
+
+class MistralForCausalLM_KIVI(MistralPreTrainedModel, _GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):
