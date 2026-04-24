@@ -97,6 +97,16 @@ BS=128      # lm_eval batch_size — must submit whole task in one generate() so
             # continuous batching keeps max_num_seqs slots full (not batch-by-batch drain).
             # All current tasks ≤ 1319 items; 128 covers it with typical short-sequence fanout.
 
+# Optional overrides via env vars:
+#   MG_OVERRIDE=16384 ./launch_vllm_reasoning.sh …   # truncate max_gen_toks (adaptive pass)
+#   LOG_SAMPLES=1 ./launch_vllm_reasoning.sh …       # save per-item generations
+if [ -n "${MG_OVERRIDE:-}" ]; then
+  echo "MG_OVERRIDE: $MG -> $MG_OVERRIDE"
+  MG=$MG_OVERRIDE
+fi
+EXTRA_EVAL_ARGS=""
+[ "${LOG_SAMPLES:-0}" = "1" ] && EXTRA_EVAL_ARGS="--log_samples"
+
 # Per-task max_model_len (measured via scripts/measure_prompt_lens.py):
 #   gsm8k_32k max prompt = 1404, gpqa = 2798, math500 = 1373.
 # max_model_len = max_prompt + max_gen_toks, rounded up to 256-multiple.
@@ -135,7 +145,7 @@ task_max_len() {
     fi
     $VLLM run_eval_vllm.py --model_path "$MODEL" $ARGS \
         --task $t --max_gen_toks $MG --batch_size $BS \
-        --max_num_seqs $MAX_NS "${extra_args[@]}"
+        --max_num_seqs $MAX_NS $EXTRA_EVAL_ARGS "${extra_args[@]}"
     rc=$?
     [ $rc -ne 0 ] && break
   done

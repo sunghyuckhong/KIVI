@@ -44,6 +44,9 @@ def parse_args():
     p.add_argument("--max_model_len", type=int, default=None,
                    help="vLLM max context. If unset, vLLM uses the model's native max_position_embeddings.")
     p.add_argument("--max_num_seqs",  type=int, default=128, help="vLLM concurrency slots")
+    p.add_argument("--log_samples",   action="store_true",
+                   help="Save per-item inputs/generations/targets to logs/<out_name>_samples.json "
+                        "(needed for adaptive rerun of truncated items at higher max_gen_toks).")
     return p.parse_args()
 
 
@@ -128,7 +131,7 @@ def main():
         model=lm,
         tasks=[args.task],
         batch_size=args.batch_size,
-        log_samples=False,
+        log_samples=args.log_samples,
         gen_kwargs=gen_kwargs,
         task_manager=tm,
         limit=args.limit,
@@ -139,6 +142,11 @@ def main():
     with open(out_path, "w") as f:
         json.dump(results["results"], f, indent=2)
     print(f"\nSaved: {out_path}")
+    if args.log_samples and "samples" in results:
+        samples_path = out_path.replace("_results.json", "_samples.json")
+        with open(samples_path, "w") as f:
+            json.dump(results["samples"], f, indent=2, default=str)
+        print(f"Saved samples: {samples_path}")
 
 
 if __name__ == "__main__":
