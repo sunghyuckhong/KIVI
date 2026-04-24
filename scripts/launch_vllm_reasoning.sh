@@ -98,11 +98,16 @@ BS=128      # lm_eval batch_size — must submit whole task in one generate() so
             # All current tasks ≤ 1319 items; 128 covers it with typical short-sequence fanout.
 
 # Optional overrides via env vars:
-#   MG_OVERRIDE=16384 ./launch_vllm_reasoning.sh …   # truncate max_gen_toks (adaptive pass)
-#   LOG_SAMPLES=1 ./launch_vllm_reasoning.sh …       # save per-item generations
+#   MG_OVERRIDE=16384  ./launch_vllm_reasoning.sh …  # truncate max_gen_toks (adaptive pass)
+#   MAX_NS_OVERRIDE=14 ./launch_vllm_reasoning.sh …  # bump max_num_seqs (useful when MG lowered)
+#   LOG_SAMPLES=1      ./launch_vllm_reasoning.sh …  # save per-item generations
 if [ -n "${MG_OVERRIDE:-}" ]; then
   echo "MG_OVERRIDE: $MG -> $MG_OVERRIDE"
   MG=$MG_OVERRIDE
+fi
+if [ -n "${MAX_NS_OVERRIDE:-}" ]; then
+  echo "MAX_NS_OVERRIDE: $MAX_NS -> $MAX_NS_OVERRIDE"
+  MAX_NS=$MAX_NS_OVERRIDE
 fi
 EXTRA_EVAL_ARGS=""
 [ "${LOG_SAMPLES:-0}" = "1" ] && EXTRA_EVAL_ARGS="--log_samples"
