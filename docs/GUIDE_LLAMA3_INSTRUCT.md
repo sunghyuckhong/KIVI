@@ -212,9 +212,9 @@ and it's in `gen_kwargs` at `simple_evaluate()` time.
   `flash-attn==2.8.3` (see Environment section). If your GPU is pre-Ampere (V100 / sm_70),
   you can't use flash-attn — edit `run_eval.py` fp16 branch to drop `attn_implementation`.
 - **`cd /workspace/KIVI: No such file or directory`** (in tmux windows): the launcher
-  scripts used to hardcode `/workspace/KIVI`. Current launchers default to
-  `/home/home-mcl/sunghyuck/kv_cache_compression/KIVI` and respect `REPO_ROOT` env var.
-  Set `REPO_ROOT=$(pwd)` before `bash scripts/phaseX_llama3_launch.sh`.
+  scripts used to hardcode `/workspace/KIVI`. Current launchers derive the repo
+  root from the script's own location (`$(dirname "${BASH_SOURCE[0]}")/..`) and
+  respect a `REPO_ROOT` env var override.
 - **No `_32k` tasks**: make sure `tasks/gsm8k/`, `tasks/gpqa/`, `tasks/math500/`,
   `tasks/aime/` all exist (they're in the repo, shouldn't be missing).
 - **HF_TOKEN not set** but `huggingface-cli login` already ran: the launcher requires

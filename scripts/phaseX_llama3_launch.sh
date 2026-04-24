@@ -5,8 +5,8 @@
 # 3. Run 9 methods × 5 tasks via run_eval.py (modern_env for transformers 4.43+).
 # max_gen_toks: 256 for TQA/CoQA (HFLM default), 4096 for reasoning (half of 8k context).
 set -u
-# Pod-specific repo root (override with REPO_ROOT env var if different)
-cd "${REPO_ROOT:-/home/home-mcl/sunghyuck/kv_cache_compression/KIVI}"
+# Derive repo root from this script's location (pod-portable); override with REPO_ROOT env var.
+cd "${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 export HF_TOKEN=${HF_TOKEN:?set HF_TOKEN before running}
 MODERN=/opt/modernenv/bin/python
 MODEL=meta-llama/Meta-Llama-3-8B-Instruct

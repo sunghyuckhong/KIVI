@@ -13,7 +13,8 @@ gpu=$2
 shift 2
 cmd="$*"
 
-REPO_ROOT="${REPO_ROOT:-/home/home-mcl/sunghyuck/kv_cache_compression/KIVI}"
+# Derive repo root from this script's location (pod-portable); override with REPO_ROOT env var.
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$REPO_ROOT"
 mkdir -p logs/run_out
 
