@@ -178,12 +178,6 @@ def monkey_patch_rope(model, collector):
     # But we don't know the layer index from apply_rotary_pos_emb alone.
     # Instead, wrap each attention module's forward to capture post-RoPE Q, K.
 
-    from transformers.models.mistral import modeling_mistral as mm
-    from transformers.models.llama   import modeling_llama   as ll
-
-    orig_apply_rope_mistral = mm.apply_rotary_pos_emb
-    orig_apply_rope_llama   = ll.apply_rotary_pos_emb
-
     # State: track which layer is currently being processed.
     current_layer = [0]
 
@@ -196,22 +190,36 @@ def monkey_patch_rope(model, collector):
     for i, layer in enumerate(model.model.layers):
         layer.self_attn.forward = wrap_forward(i, layer.self_attn.forward)
 
-    def patched_rope_mistral(q, k, cos, sin, position_ids=None, *a, **kw):
-        qr, kr = orig_apply_rope_mistral(q, k, cos, sin, position_ids, *a, **kw)
-        li = current_layer[0]
-        collector.update_q(li, qr)
-        collector.update_k(li, kr)
-        return qr, kr
+    def _make_patch(orig):
+        def patched(q, k, cos, sin, position_ids=None, *a, **kw):
+            qr, kr = orig(q, k, cos, sin, position_ids, *a, **kw)
+            li = current_layer[0]
+            collector.update_q(li, qr)
+            collector.update_k(li, kr)
+            return qr, kr
+        return patched
 
-    def patched_rope_llama(q, k, cos, sin, position_ids=None, *a, **kw):
-        qr, kr = orig_apply_rope_llama(q, k, cos, sin, position_ids, *a, **kw)
-        li = current_layer[0]
-        collector.update_q(li, qr)
-        collector.update_k(li, kr)
-        return qr, kr
+    # Patch every architecture we know about. Transformers loads modeling
+    # modules lazily, so we guard each import.
+    _targets = []
+    try:
+        from transformers.models.mistral import modeling_mistral as mm
+        _targets.append(("mistral", mm))
+    except Exception:
+        pass
+    try:
+        from transformers.models.llama import modeling_llama as ll
+        _targets.append(("llama", ll))
+    except Exception:
+        pass
+    try:
+        from transformers.models.qwen3 import modeling_qwen3 as qw
+        _targets.append(("qwen3", qw))
+    except Exception:
+        pass
 
-    mm.apply_rotary_pos_emb = patched_rope_mistral
-    ll.apply_rotary_pos_emb = patched_rope_llama
+    for _name, _mod in _targets:
+        _mod.apply_rotary_pos_emb = _make_patch(_mod.apply_rotary_pos_emb)
 
 
 def main():
@@ -230,7 +238,7 @@ def main():
     num_layers = cfg.num_hidden_layers
     num_q_heads = cfg.num_attention_heads
     num_kv_heads = getattr(cfg, "num_key_value_heads", num_q_heads)
-    head_dim = cfg.hidden_size // num_q_heads
+    head_dim = getattr(cfg, "head_dim", None) or (cfg.hidden_size // num_q_heads)
 
     print(f"Model: {num_layers} layers, {num_q_heads} Q heads, "
           f"{num_kv_heads} KV heads, head_dim={head_dim}")

@@ -32,6 +32,7 @@ MODEL_DISPLAY = {
     "deepseek-r1-distill-llama-8b":     "DeepSeek-R1-Distill-Llama-8B",
     "mistral-7b-instruct-v0.2":         "Mistral-7B-Instruct-v0.2",
     "qwen2.5-7b-instruct":              "Qwen2.5-7B-Instruct",
+    "qwen3-8b":                         "Qwen3-8B",
 }
 
 

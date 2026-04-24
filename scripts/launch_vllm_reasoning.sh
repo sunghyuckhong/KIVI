@@ -83,15 +83,24 @@ case "$PRESET" in
     MAX_NS=15       # at per-task max_model_len ≈ 18-19k: 280k / 19k ≈ 14.7
     USE_TASK_LEN=1
     ;;
+  qwen3-8b)
+    MODEL=Qwen/Qwen3-8B
+    MG=32768        # ctx 40960, rule: > 32768 → cap at 32768
+    MAX_NS=8        # KV ≈ 72KB/token (8 KV heads × 128 × bf16 × 36 layers); budget allows more, start conservative
+    USE_TASK_LEN=1
+    ;;
   *)
     echo "Unknown preset: $PRESET" >&2
-    echo "Available: llama3-instruct, mistral-instruct, dsr1-llama-8b" >&2
+    echo "Available: llama3-instruct, mistral-instruct, dsr1-llama-8b, qwen3-8b" >&2
     exit 2
     ;;
 esac
 
 export CUDA_VISIBLE_DEVICES=$GPU
-VLLM=/opt/vllm_env/bin/python
+case "$PRESET" in
+  qwen3-8b) VLLM=/opt/vllm_qwen3_env/bin/python ;;
+  *)        VLLM=/opt/vllm_env/bin/python ;;
+esac
 LOG=logs/run_out/${STREAM}_vllm.log
 BS=128      # lm_eval batch_size — must submit whole task in one generate() so vLLM's
             # continuous batching keeps max_num_seqs slots full (not batch-by-batch drain).
@@ -112,16 +121,18 @@ fi
 EXTRA_EVAL_ARGS=""
 [ "${LOG_SAMPLES:-0}" = "1" ] && EXTRA_EVAL_ARGS="--log_samples"
 
-# Per-task max_model_len (measured via scripts/measure_prompt_lens.py):
-#   gsm8k_32k max prompt = 1404, gpqa = 2798, math500 = 1373.
+# Per-task max_model_len (measured via measure_prompt_lens.py):
+#   Llama3 tok: gsm8k=1404, gpqa=2798, math500=1373.
+#   Qwen3  tok: gsm8k=1597, gpqa=2800, math500=1433.
+# Use max across tokenizers (slack is within 256-rounding anyway).
 # max_model_len = max_prompt + max_gen_toks, rounded up to 256-multiple.
 task_max_len() {
   local t=$1 mg=$2
   local prompt
   case "$t" in
-    gsm8k_32k)                    prompt=1404 ;;
-    gpqa_diamond_cot_n_shot_32k)  prompt=2798 ;;
-    math500_32k)                  prompt=1373 ;;
+    gsm8k_32k)                    prompt=1600 ;;
+    gpqa_diamond_cot_n_shot_32k)  prompt=2800 ;;
+    math500_32k)                  prompt=1450 ;;
     *)                            prompt=4096 ;;  # conservative default for unknown task
   esac
   local total=$((prompt + mg))
