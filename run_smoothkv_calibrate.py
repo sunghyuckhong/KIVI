@@ -76,12 +76,11 @@ class StatCollector:
         self.max_v = torch.zeros(num_layers, num_kv_heads, head_dim, device=device)
 
         if self.R > 0:
-            # CPU fp16 buffers — kept out of GPU memory. Accessed vectorised
-            # in _update() below. count_* tracks "n values seen so far".
+            # CPU bf16 buffers — match Qwen3's native dtype (no lossy fp16 downcast).
             self.samples_k = torch.zeros(num_layers, num_kv_heads, head_dim, self.R,
-                                         dtype=torch.float16)
+                                         dtype=torch.bfloat16)
             self.samples_v = torch.zeros(num_layers, num_kv_heads, head_dim, self.R,
-                                         dtype=torch.float16)
+                                         dtype=torch.bfloat16)
             self.count_k = torch.zeros(num_layers, num_kv_heads, head_dim, dtype=torch.long)
             self.count_v = torch.zeros(num_layers, num_kv_heads, head_dim, dtype=torch.long)
         else:
@@ -89,13 +88,16 @@ class StatCollector:
             self.count_k  = self.count_v  = None
 
     def update_q(self, layer_idx, q):
-        m = q.abs().amax(dim=(0, 2)).to(torch.float32)
+        # Move incoming tensor to the collector's device — necessary when the
+        # model is sharded across GPUs via device_map='auto' (layers may live
+        # on cuda:1 while the collector buffers are on cuda:0).
+        m = q.abs().amax(dim=(0, 2)).to(torch.float32).to(self.max_q.device)
         torch.maximum(self.max_q[layer_idx], m, out=self.max_q[layer_idx])
 
     def _update(self, layer_idx, x, max_buf, sample_buf, count_buf):
         """Update running max and (optionally) reservoir sample for x: (B,nh,T,D)."""
         a = x.abs()
-        m = a.amax(dim=(0, 2)).to(torch.float32)  # (nh, D)
+        m = a.amax(dim=(0, 2)).to(torch.float32).to(max_buf.device)  # (nh, D)
         torch.maximum(max_buf[layer_idx], m, out=max_buf[layer_idx])
 
         if sample_buf is None:
@@ -104,8 +106,9 @@ class StatCollector:
         B, nh, T, D = a.shape
         N = B * T
 
-        # Reshape to (nh, D, N) then move to CPU fp16 once per batch.
-        flat = a.permute(1, 3, 0, 2).reshape(nh, D, N).to(torch.float16).cpu()
+        # Reshape to (nh, D, N) then move to CPU once per batch. Match sample_buf dtype
+        # (bf16) so we don't downcast bf16 activations through fp16.
+        flat = a.permute(1, 3, 0, 2).reshape(nh, D, N).to(sample_buf.dtype).cpu()
         # Per channel, fill empty slots first then do reservoir replacement.
         buf = sample_buf[layer_idx]   # (nh, D, R)
         for h in range(nh):
@@ -139,6 +142,28 @@ class StatCollector:
         self._update(layer_idx, v, self.max_v, self.samples_v, self.count_v)
 
 
+def _get_layers(model):
+    """Return the transformer layer ModuleList, walking past common wrappers.
+    Handles plain ForCausalLM (model.model.layers), AutoModel base
+    (model.layers), and multimodal wrappers like Exaone4_5_Model that hold
+    the LM under .language_model (model.language_model.layers)."""
+    for attr_chain in (("model", "layers"), ("language_model", "layers"),
+                       ("model", "language_model", "layers"), ("layers",)):
+        m = model
+        ok = True
+        for a in attr_chain:
+            if not hasattr(m, a):
+                ok = False
+                break
+            m = getattr(m, a)
+        if ok:
+            return m
+    raise AttributeError(
+        f"Could not find transformer layers on {type(model).__name__}; "
+        f"tried .model.layers, .language_model.layers, .model.language_model.layers, .layers"
+    )
+
+
 def install_hooks(model, collector):
     """Hook into each attention module to capture post-RoPE Q, K and pre-RoPE V."""
     hooks = []
@@ -156,7 +181,7 @@ def install_hooks(model, collector):
     # This is cleaner than trying to post-process module output.
 
     # Capture V via v_proj hook (pre-RoPE since V has no RoPE in Mistral/Llama)
-    for i, layer in enumerate(model.model.layers):
+    for i, layer in enumerate(_get_layers(model)):
         def make_v_hook(layer_idx):
             def hook_v(module, inp, out):
                 # out: (B, T, num_kv_heads * head_dim)
@@ -187,12 +212,15 @@ def monkey_patch_rope(model, collector):
             return orig_fwd(*args, **kwargs)
         return new_fwd
 
-    for i, layer in enumerate(model.model.layers):
+    for i, layer in enumerate(_get_layers(model)):
         layer.self_attn.forward = wrap_forward(i, layer.self_attn.forward)
 
     def _make_patch(orig):
-        def patched(q, k, cos, sin, position_ids=None, *a, **kw):
-            qr, kr = orig(q, k, cos, sin, position_ids, *a, **kw)
+        # transformers 4.x: apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1)
+        # transformers 5.x: apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1)   # position_ids removed
+        # Forward *args/**kwargs verbatim so we don't introduce spurious positional args.
+        def patched(*args, **kwargs):
+            qr, kr = orig(*args, **kwargs)
             li = current_layer[0]
             collector.update_q(li, qr)
             collector.update_k(li, kr)
@@ -217,6 +245,21 @@ def monkey_patch_rope(model, collector):
         _targets.append(("qwen3", qw))
     except Exception:
         pass
+    try:
+        from transformers.models.qwen3_moe import modeling_qwen3_moe as qwm
+        _targets.append(("qwen3_moe", qwm))
+    except Exception:
+        pass
+    try:
+        from transformers.models.qwen2 import modeling_qwen2 as qw2
+        _targets.append(("qwen2", qw2))
+    except Exception:
+        pass
+    try:
+        from transformers.models.exaone4 import modeling_exaone4 as ex4
+        _targets.append(("exaone4", ex4))
+    except Exception:
+        pass
 
     for _name, _mod in _targets:
         _mod.apply_rotary_pos_emb = _make_patch(_mod.apply_rotary_pos_emb)
@@ -230,11 +273,35 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, use_fast=False)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_path, torch_dtype=torch.float16, low_cpu_mem_usage=True
-    ).to(device).eval()
+
+    # Multi-GPU auto-shard kicks in when --device is set to "auto" — used for
+    # 33B+ models like EXAONE-4.5-33B that don't comfortably fit on a single 80GB.
+    load_kwargs = dict(torch_dtype="auto", low_cpu_mem_usage=True)
+    if device == "auto":
+        load_kwargs["device_map"] = "auto"
+
+    # AutoModelForCausalLM works for plain text-only models. For multimodal
+    # wrappers like Exaone4_5_ForConditionalGeneration (which holds the LM
+    # under .language_model), AutoModelForCausalLM has no registry entry —
+    # fall back to AutoModel and trust the LM weights still load. Calibration
+    # hooks attach to modeling_exaone4.apply_rotary_pos_emb so they fire
+    # regardless of which wrapper holds the language model.
+    try:
+        model = AutoModelForCausalLM.from_pretrained(args.model_path, **load_kwargs)
+    except (ValueError, KeyError) as e:
+        print(f"AutoModelForCausalLM failed ({type(e).__name__}); trying AutoModel for multimodal wrapper")
+        from transformers import AutoModel
+        model = AutoModel.from_pretrained(args.model_path, **load_kwargs)
+    model = model if device == "auto" else model.to(device)
+    model = model.eval()
+    if device == "auto":
+        device = "cuda:0"  # collector uses this for stat tensors
 
     cfg = model.config
+    # Multimodal wrappers (e.g. Exaone4_5_Config) hold the LM hyperparams under
+    # cfg.text_config; fall back to that if the top-level config lacks them.
+    if not hasattr(cfg, "num_hidden_layers") and hasattr(cfg, "text_config"):
+        cfg = cfg.text_config
     num_layers = cfg.num_hidden_layers
     num_q_heads = cfg.num_attention_heads
     num_kv_heads = getattr(cfg, "num_key_value_heads", num_q_heads)
