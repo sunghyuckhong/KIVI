@@ -102,7 +102,12 @@ if __name__ == "__main__":
     set_seed(42)
 
     model_args, data_args, training_args = process_args()
-    dtype = torch.float16
+    # Preserve model-native dtype (bf16 for Llama-3/Mistral/DSR1/Qwen3). Hardcoding fp16
+    # on bf16-native models loses range and degrades reasoning accuracy.
+    from transformers import AutoConfig
+    _td = getattr(AutoConfig.from_pretrained(model_args.model_name_or_path), "torch_dtype", None)
+    dtype = _td if isinstance(_td, torch.dtype) else torch.bfloat16
+    print(f"[run_lm_eval_harness] Model dtype: {dtype}")
     model_path = model_args.model_name_or_path.lower()
     is_llama = "llama" in model_path
     is_mistral = "mistral" in model_path

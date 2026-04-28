@@ -60,7 +60,19 @@ def main():
     p.add_argument("--group_size", type=int, default=128)
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--fp16", action="store_true", help="Skip patching (pure fp16 baseline)")
+    p.add_argument("--dtype", type=str, default="auto",
+                   choices=["auto", "float16", "bfloat16", "float32"],
+                   help="Model dtype. 'auto' preserves model-native (bf16 for Llama-3/Mistral/DSR1/Qwen3).")
     args = p.parse_args()
+
+    if args.dtype == "auto":
+        from transformers import AutoConfig
+        td = getattr(AutoConfig.from_pretrained(args.model_path), "torch_dtype", None)
+        _dt = td if isinstance(td, torch.dtype) else torch.bfloat16
+    else:
+        _dt = {"float16": torch.float16, "bfloat16": torch.bfloat16,
+               "float32": torch.float32}[args.dtype]
+    print(f"Model dtype: {_dt}")
 
     os.makedirs("logs", exist_ok=True)
     m_short = args.model_path.rstrip("/").split("/")[-1].lower()
@@ -77,7 +89,7 @@ def main():
 
     print(f"Loading {args.model_path}...")
     model = AutoModelForCausalLM.from_pretrained(
-        args.model_path, torch_dtype=torch.float16, low_cpu_mem_usage=True,
+        args.model_path, torch_dtype=_dt, low_cpu_mem_usage=True,
     ).cuda().eval()
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, use_fast=False)
     if tokenizer.pad_token is None:

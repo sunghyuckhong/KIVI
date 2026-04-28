@@ -69,7 +69,22 @@ def parse_args():
                         "Most effective on FP16 baseline; may help on KIVI paths if graph breaks are tolerable.")
     p.add_argument("--limit", type=int, default=None,
                    help="Limit evaluation to first N samples (bench / debug).")
+    p.add_argument("--dtype", type=str, default="auto",
+                   choices=["auto", "float16", "bfloat16", "float32"],
+                   help="Model dtype. 'auto' (default) preserves model-native "
+                        "(bf16 for Llama-3/Mistral/DSR1/Qwen3). Hardcoding fp16 "
+                        "on a bf16-native model loses range and degrades reasoning accuracy.")
     return p.parse_args()
+
+
+def resolve_dtype(arg_dtype, model_path):
+    """'auto' → read config.torch_dtype; explicit → map. Mirrors run_eval_vllm.py."""
+    if arg_dtype == "auto":
+        from transformers import AutoConfig
+        td = getattr(AutoConfig.from_pretrained(model_path), "torch_dtype", None)
+        return td if isinstance(td, torch.dtype) else torch.bfloat16
+    return {"float16": torch.float16, "bfloat16": torch.bfloat16,
+            "float32": torch.float32}[arg_dtype]
 
 
 def model_short_name(model_path):
@@ -128,12 +143,14 @@ def is_llama(model_path):
 
 def load_model(args):
     mp = args.model_path
+    _dt = resolve_dtype(args.dtype, mp)
+    print(f"Model dtype: {_dt}")
 
     if args.model == "fp16":
         from transformers import AutoModelForCausalLM
         print(f"Loading FP16 {mp} (no quantization, flash_attention_2)...")
         return AutoModelForCausalLM.from_pretrained(
-            mp, torch_dtype=torch.float16, low_cpu_mem_usage=True,
+            mp, torch_dtype=_dt, low_cpu_mem_usage=True,
             attn_implementation="flash_attention_2",
         ).cuda()
 
@@ -151,14 +168,14 @@ def load_model(args):
             from models.llama_kivi_fp8 import LlamaForCausalLM_FP8
             print(f"Loading FP8 Llama {mp} (group={args.group_size})...")
             return LlamaForCausalLM_FP8.from_pretrained(
-                mp, config=config, low_cpu_mem_usage=True, torch_dtype=torch.float16
+                mp, config=config, low_cpu_mem_usage=True, torch_dtype=_dt
             ).cuda()
         if not hasattr(config, "sliding_window") or config.sliding_window is None:
             config.sliding_window = config.max_position_embeddings
         from models.mistral_kivi_fp8 import MistralForCausalLM_FP8
         print(f"Loading FP8 {mp} (group={args.group_size})...")
         return MistralForCausalLM_FP8.from_pretrained(
-            mp, config=config, low_cpu_mem_usage=True, torch_dtype=torch.float16
+            mp, config=config, low_cpu_mem_usage=True, torch_dtype=_dt
         ).cuda()
 
     if args.model == "smoothkv":
@@ -170,7 +187,7 @@ def load_model(args):
                   f"group={args.group_size})...")
             return LlamaForCausalLM_SmoothKV.from_pretrained_with_calib(
                 mp, args.calib_path, config=config,
-                low_cpu_mem_usage=True, torch_dtype=torch.float16
+                low_cpu_mem_usage=True, torch_dtype=_dt
             ).cuda()
         if not hasattr(config, "sliding_window") or config.sliding_window is None:
             config.sliding_window = config.max_position_embeddings
@@ -179,7 +196,7 @@ def load_model(args):
               f"group={args.group_size})...")
         return MistralForCausalLM_SmoothKV.from_pretrained_with_calib(
             mp, args.calib_path, config=config,
-            low_cpu_mem_usage=True, torch_dtype=torch.float16
+            low_cpu_mem_usage=True, torch_dtype=_dt
         ).cuda()
 
     if args.model == "pertoken":
@@ -189,7 +206,7 @@ def load_model(args):
             print(f"Loading pertoken Llama {mp} (k_bits={args.k_bits}, v_bits={args.v_bits}, "
                   f"group={args.group_size}, residual={args.residual})...")
             return LlamaForCausalLM_KIVI_PerToken.from_pretrained(
-                mp, config=config, low_cpu_mem_usage=True, torch_dtype=torch.float16
+                mp, config=config, low_cpu_mem_usage=True, torch_dtype=_dt
             ).cuda()
         if not hasattr(config, "sliding_window") or config.sliding_window is None:
             config.sliding_window = config.max_position_embeddings
@@ -197,7 +214,7 @@ def load_model(args):
         print(f"Loading pertoken {mp} (k_bits={args.k_bits}, v_bits={args.v_bits}, "
               f"group={args.group_size}, residual={args.residual})...")
         return MistralForCausalLM_KIVI_PerToken.from_pretrained(
-            mp, config=config, low_cpu_mem_usage=True, torch_dtype=torch.float16
+            mp, config=config, low_cpu_mem_usage=True, torch_dtype=_dt
         ).cuda()
 
     if is_llama(mp):
@@ -206,7 +223,7 @@ def load_model(args):
             print(f"Loading KIVI {mp} (k_bits={args.k_bits}, v_bits={args.v_bits}, "
                   f"group={args.group_size}, residual={args.residual})...")
             return LlamaForCausalLM_KIVI.from_pretrained(
-                mp, config=config, low_cpu_mem_usage=True, torch_dtype=torch.float16
+                mp, config=config, low_cpu_mem_usage=True, torch_dtype=_dt
             ).cuda()
     else:
         # Mistral KIVI
@@ -214,7 +231,7 @@ def load_model(args):
         print(f"Loading KIVI {mp} (k_bits={args.k_bits}, v_bits={args.v_bits}, "
               f"group={args.group_size}, residual={args.residual})...")
         return MistralForCausalLM_KIVI.from_pretrained(
-            mp, config=config, low_cpu_mem_usage=True, torch_dtype=torch.float16
+            mp, config=config, low_cpu_mem_usage=True, torch_dtype=_dt
         ).cuda()
 
 

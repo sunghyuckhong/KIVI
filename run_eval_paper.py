@@ -40,7 +40,19 @@ def parse_args():
     p.add_argument("--k_bits",     type=int, default=2)
     p.add_argument("--v_bits",     type=int, default=2)
     p.add_argument("--batch_size", type=int, default=16)
+    p.add_argument("--dtype", type=str, default="auto",
+                   choices=["auto", "float16", "bfloat16", "float32"],
+                   help="Model dtype. 'auto' preserves model-native (bf16 for Llama-3/Mistral/DSR1/Qwen3).")
     return p.parse_args()
+
+
+def resolve_dtype(arg_dtype, model_path):
+    if arg_dtype == "auto":
+        from transformers import AutoConfig
+        td = getattr(AutoConfig.from_pretrained(model_path), "torch_dtype", None)
+        return td if isinstance(td, torch.dtype) else torch.bfloat16
+    return {"float16": torch.float16, "bfloat16": torch.bfloat16,
+            "float32": torch.float32}[arg_dtype]
 
 
 def is_llama(model_path):
@@ -64,6 +76,8 @@ def output_name(args):
 def load_kivi_model(args):
     """Load a KIVI quantized model."""
     mp = args.model_path
+    _dt = resolve_dtype(args.dtype, mp)
+    print(f"Model dtype: {_dt}")
     if is_llama(mp):
         from transformers import LlamaConfig
         config = LlamaConfig.from_pretrained(mp)
@@ -77,7 +91,7 @@ def load_kivi_model(args):
         print(f"Loading KIVI {mp} (k={args.k_bits}, v={args.v_bits}, "
               f"g={args.group_size}, res={args.residual})...")
         return LlamaForCausalLM_KIVI.from_pretrained(
-            mp, config=config, low_cpu_mem_usage=True, torch_dtype=torch.float16
+            mp, config=config, low_cpu_mem_usage=True, torch_dtype=_dt
         ).cuda()
     else:
         from transformers import MistralConfig
@@ -92,7 +106,7 @@ def load_kivi_model(args):
         print(f"Loading KIVI {mp} (k={args.k_bits}, v={args.v_bits}, "
               f"g={args.group_size}, res={args.residual})...")
         return MistralForCausalLM_KIVI.from_pretrained(
-            mp, config=config, low_cpu_mem_usage=True, torch_dtype=torch.float16
+            mp, config=config, low_cpu_mem_usage=True, torch_dtype=_dt
         ).cuda()
 
 
@@ -112,7 +126,7 @@ def main():
     if args.model == "fp16":
         results = simple_evaluate(
             model="hf",
-            model_args=f"pretrained={args.model_path},dtype=float16",
+            model_args=f"pretrained={args.model_path},dtype={args.dtype}",
             tasks=task_cfg["tasks"],
             num_fewshot=task_cfg["num_fewshot"],
             batch_size=args.batch_size,
@@ -126,7 +140,7 @@ def main():
         tokenizer = AutoTokenizer.from_pretrained(args.model_path, use_fast=False)
 
         # Create HFLM with the original model path (it loads the standard model)
-        lm = HFLM(pretrained=args.model_path, dtype="float16", batch_size=args.batch_size)
+        lm = HFLM(pretrained=args.model_path, dtype=args.dtype, batch_size=args.batch_size)
         # Swap in the KIVI model
         lm._model = kivi_model
         lm.tokenizer = tokenizer
