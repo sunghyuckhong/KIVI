@@ -42,6 +42,10 @@ def parse_args():
                    help="items with gen tokens >= (first_pass_MG - slack) count as truncated")
     p.add_argument("--dtype",            default="auto",
                    help="vLLM dtype. 'auto' picks model-native (bf16 for bf16-native models).")
+    p.add_argument("--enforce_eager",    action="store_true",
+                   help="Force vLLM to enforce_eager=True (no CUDA graph capture). "
+                        "Use when adaptive_rerun follows a SmoothKV plugin pass1 — "
+                        "graph state from the plugin can corrupt fresh capture.")
     return p.parse_args()
 
 
@@ -116,7 +120,7 @@ def main():
         max_model_len=mml,
         max_num_seqs=args.max_num_seqs,
         gpu_memory_utilization=args.gpu_memory_utilization,
-        enforce_eager=False,
+        enforce_eager=args.enforce_eager,
         enable_prefix_caching=True,
         disable_log_stats=False,
     )
