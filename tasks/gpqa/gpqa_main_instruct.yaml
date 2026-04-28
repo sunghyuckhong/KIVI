@@ -1,0 +1,41 @@
+task: gpqa_main_cot_n_shot_32k_instruct
+dataset_path: Idavidrein/gpqa
+dataset_name: gpqa_main
+output_type: generate_until
+process_docs: !function utils.process_docs
+training_split: train
+validation_split: train
+test_split: null
+doc_to_text: "Question: {{Question}}\nChoices:\n(A) {{choice1}}\n(B) {{choice2}}\n(C) {{choice3}}\n(D) {{choice4}}\nReason step by step. Put the final answer letter (A, B, C, or D) in \\boxed{}."
+doc_to_target: answer
+filter_list:
+  - name: "strict-match"
+    filter:
+      - function: "regex"
+        regex_pattern: "\\\\boxed\\{([A-D])\\}"
+      - function: "take_first"
+  - name: "flexible-extract"
+    filter:
+      - function: "multi_choice_regex"
+        group_select: -1
+        ignore_case: true
+        ignore_punctuation: true
+        regex_pattern: "(\\([A-Z]\\))"
+      - function: "take_first"
+generation_kwargs:
+  until:
+    - "<|im_end|>"
+    - "<|endoftext|>"
+    - "</s>"
+  do_sample: false
+  temperature: 0.0
+  max_gen_toks: 32768
+metric_list:
+  - metric: exact_match
+    aggregation: mean
+    higher_is_better: true
+    ignore_case: true
+    ignore_punctuation: true
+num_fewshot: 0
+metadata:
+  version: 1.0

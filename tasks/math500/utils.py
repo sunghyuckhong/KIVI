@@ -96,6 +96,26 @@ def process_results(doc: dict, results: List[str]) -> Dict[str, int]:
     return results
 
 
+def process_results_chat(doc: dict, results: List[str]) -> Dict[str, int]:
+    """Chat-template extractor: prefer the Minerva 'I hope it is correct' pattern
+    when present (5-shot prompt), fall back to the last \\boxed{...} when the
+    model emits a boxed answer directly (0-shot chat prompt)."""
+    candidates = results[0]
+
+    unnormalized_answer = get_unnormalized_answer(candidates)
+    if unnormalized_answer == "[invalidanswer]":
+        boxed = last_boxed_only_string(candidates)
+        if boxed is not None:
+            try:
+                unnormalized_answer = remove_boxed(boxed)
+            except Exception:
+                pass
+
+    answer = normalize_final_answer(unnormalized_answer)
+    retval = 1 if is_equiv(answer, doc["answer"]) else 0
+    return {"exact_match": retval}
+
+
 def last_boxed_only_string(string: str) -> Optional[str]:
     idx = string.rfind("\\boxed")
     if "\\boxed " in string:

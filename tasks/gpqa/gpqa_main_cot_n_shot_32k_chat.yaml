@@ -1,0 +1,11 @@
+dataset_name: gpqa_main
+include: _gpqa_cot_n_shot_yaml_32k.yaml
+task: gpqa_main_cot_n_shot_32k_chat
+doc_to_text: "<|im_start|>user\nQuestion: {{Question}}\nChoices:\n(A) {{choice1}}\n(B) {{choice2}}\n(C) {{choice3}}\n(D) {{choice4}}\nLet's think step by step. /no_think<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+generation_kwargs:
+  until:
+    - "<|im_end|>"
+    - "</s>"
+  do_sample: false
+  temperature: 0.0
+  max_gen_toks: 32768

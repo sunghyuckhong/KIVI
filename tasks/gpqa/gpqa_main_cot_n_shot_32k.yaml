@@ -1,0 +1,3 @@
+dataset_name: gpqa_main
+include: _gpqa_cot_n_shot_yaml_32k.yaml
+task: gpqa_main_cot_n_shot_32k
