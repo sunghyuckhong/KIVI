@@ -4,7 +4,12 @@ from typing import Dict, List, Optional
 
 import datasets
 
-from lm_eval.utils import eval_logger
+try:
+    from lm_eval.utils import eval_logger
+except ImportError:
+    # lm_eval >= 0.4.10 dropped the `eval_logger` symbol; fall back to stdlib.
+    import logging
+    eval_logger = logging.getLogger("lm_eval.tasks.math500")
 
 
 try:
