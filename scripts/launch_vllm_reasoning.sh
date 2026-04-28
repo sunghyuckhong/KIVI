@@ -86,25 +86,37 @@ case "$PRESET" in
   qwen3-8b)
     MODEL=Qwen/Qwen3-8B
     MG=32768        # ctx 40960, rule: > 32768 → cap at 32768
-    MAX_NS=8        # KV ≈ 72KB/token (8 KV heads × 128 × bf16 × 36 layers); budget allows more, start conservative
+    MAX_NS=64       # nominal ceiling; vLLM self-throttles to KV-budget fit (~15 effective
+                    # at 17920 tokens). Combined with BS=64, continuous batching refills
+                    # slots from a 64-prompt pool → no tail drain.
     USE_TASK_LEN=1
+    ;;
+  exaone-4.5-33b)
+    MODEL=LGAI-EXAONE/EXAONE-4.5-33B
+    MG=32768        # ctx 262144 (256k), rule: > 32768 → cap at 32768
+    MAX_NS=16       # 33B BF16 takes ~32GB per TP rank, hybrid attn (sliding=4096 on 48/64
+                    # layers) keeps KV per-token small. At max_model_len=36k, KV per request
+                    # ≈ 3GB → 16 concurrent slots fit comfortably in 2x80GB.
+    USE_TASK_LEN=1
+    TP_SIZE=2       # 33B doesn't fit on a single 80GB once we add KV + activations
     ;;
   *)
     echo "Unknown preset: $PRESET" >&2
-    echo "Available: llama3-instruct, mistral-instruct, dsr1-llama-8b, qwen3-8b" >&2
+    echo "Available: llama3-instruct, mistral-instruct, dsr1-llama-8b, qwen3-8b, exaone-4.5-33b" >&2
     exit 2
     ;;
 esac
 
+# TP_SIZE may have been set by the preset; default to 1 for single-GPU presets.
+TP_SIZE="${TP_SIZE:-1}"
+
 export CUDA_VISIBLE_DEVICES=$GPU
 case "$PRESET" in
-  qwen3-8b) VLLM=/opt/vllm_qwen3_env/bin/python ;;
-  *)        VLLM=/opt/vllm_env/bin/python ;;
+  qwen3-8b)        VLLM=/opt/vllm_qwen3_env/bin/python ;;
+  exaone-4.5-33b)  VLLM=/opt/vllm_exaone_v2_env/bin/python ;;
+  *)               VLLM=/opt/vllm_env/bin/python ;;
 esac
 LOG=logs/run_out/${STREAM}_vllm.log
-BS=128      # lm_eval batch_size — must submit whole task in one generate() so vLLM's
-            # continuous batching keeps max_num_seqs slots full (not batch-by-batch drain).
-            # All current tasks ≤ 1319 items; 128 covers it with typical short-sequence fanout.
 
 # Optional overrides via env vars:
 #   MG_OVERRIDE=16384  ./launch_vllm_reasoning.sh …  # truncate max_gen_toks (adaptive pass)
@@ -118,6 +130,11 @@ if [ -n "${MAX_NS_OVERRIDE:-}" ]; then
   echo "MAX_NS_OVERRIDE: $MAX_NS -> $MAX_NS_OVERRIDE"
   MAX_NS=$MAX_NS_OVERRIDE
 fi
+# BS must be set AFTER overrides so MAX_NS_OVERRIDE actually takes effect on
+# lm_eval's batch_size (otherwise vLLM has more concurrency slots than lm_eval
+# fills and the bump is a no-op).
+BS=$MAX_NS  # lm_eval batch_size = vLLM max_num_seqs. Every generate() chunk
+            # matches the concurrency slots exactly → tqdm advances every MAX_NS items.
 EXTRA_EVAL_ARGS=""
 [ "${LOG_SAMPLES:-0}" = "1" ] && EXTRA_EVAL_ARGS="--log_samples"
 
@@ -132,6 +149,7 @@ task_max_len() {
   case "$t" in
     gsm8k_32k)                    prompt=1600 ;;
     gpqa_diamond_cot_n_shot_32k)  prompt=2800 ;;
+    gpqa_main_cot_n_shot_32k)     prompt=2800 ;;
     math500_32k)                  prompt=1450 ;;
     *)                            prompt=4096 ;;  # conservative default for unknown task
   esac
@@ -161,7 +179,7 @@ task_max_len() {
     fi
     $VLLM run_eval_vllm.py --model_path "$MODEL" $ARGS \
         --task $t --max_gen_toks $MG --batch_size $BS \
-        --max_num_seqs $MAX_NS $EXTRA_EVAL_ARGS "${extra_args[@]}"
+        --max_num_seqs $MAX_NS --tp $TP_SIZE $EXTRA_EVAL_ARGS "${extra_args[@]}"
     rc=$?
     [ $rc -ne 0 ] && break
   done
