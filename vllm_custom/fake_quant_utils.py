@@ -44,7 +44,7 @@ def fake_quantize_fp8(x: torch.Tensor, num_kv_heads: int, head_dim: int,
     """Fake FP8 quant: quant→dequant round-trip at FP8 precision."""
     orig_shape = x.shape
     orig_dtype = x.dtype
-    x4 = _to_bnhtd(x, num_kv_heads, head_dim).to(torch.float16)
+    x4 = _to_bnhtd(x, num_kv_heads, head_dim)
     uint8, scale = _fp8_q(x4, group_size=group_size)
     out = _fp8_dq(uint8, scale, group_size=group_size)
     return _from_bnhtd(out, orig_shape).to(orig_dtype)
@@ -59,7 +59,7 @@ def fake_quantize_k_perchannel(x: torch.Tensor, num_kv_heads: int, head_dim: int
     """
     orig_shape = x.shape
     orig_dtype = x.dtype
-    x4 = _to_bnhtd(x, num_kv_heads, head_dim).to(torch.float16)  # (B,nh,T,D)
+    x4 = _to_bnhtd(x, num_kv_heads, head_dim)  # (B,nh,T,D) — keep input dtype
     B, nh, T, D = x4.shape
     # quant_and_pack_kcache requires T % group_size == 0
     pad = (-T) % group_size
@@ -81,7 +81,7 @@ def fake_quantize_v_pertoken(x: torch.Tensor, num_kv_heads: int, head_dim: int,
     """
     orig_shape = x.shape
     orig_dtype = x.dtype
-    x4 = _to_bnhtd(x, num_kv_heads, head_dim).to(torch.float16)  # (B,nh,T,D)
+    x4 = _to_bnhtd(x, num_kv_heads, head_dim)  # (B,nh,T,D) — keep input dtype
     B, nh, T, D = x4.shape
     assert D % group_size == 0, f"head_dim {D} not divisible by group_size {group_size}"
     code, scale, mn = quant_and_pack_vcache(x4, group_size, bits)

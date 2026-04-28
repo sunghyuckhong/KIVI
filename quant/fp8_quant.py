@@ -45,7 +45,7 @@ def quantize_fp8(
     data_fp8 = data_scaled.to(_FP8_DTYPE).view(B, nh, T, D)
     data_uint8 = data_fp8.view(torch.uint8)
 
-    return data_uint8, scale.to(torch.float16)
+    return data_uint8, scale.to(data.dtype)   # match caller dtype (bf16/fp16)
 
 
 def dequantize_fp8(
@@ -70,6 +70,6 @@ def dequantize_fp8(
     # Expand scale from (B, nh, T, num_groups) -> (B, nh, T, D)
     scale_expanded = scale.unsqueeze(-1).expand(B, nh, T, num_groups, group_size).reshape(B, nh, T, D)
 
-    out = data_fp8.to(torch.float16) * scale_expanded
+    out = data_fp8.to(scale.dtype) * scale_expanded
     # FP8 e4m3fn can carry NaN; guard downstream attention math.
     return torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)

@@ -61,8 +61,8 @@ def unpack_and_dequant_kcache(k_code: torch.FloatTensor,
 	shape = data.shape
 	num_groups = shape[pack_dim] // group_size
 	data = data.view(shape[:pack_dim] + (num_groups, group_size,) + shape[pack_dim+1:])
-	data = data.to(torch.float16)
-	data = data * scale + mn 
+	data = data.to(scale.dtype)   # preserve caller dtype (bf16 or fp16)
+	data = data * scale + mn
 	return data.view(shape)
 
 	
@@ -78,8 +78,8 @@ def unpack_and_dequant_vcache(v_code: torch.FloatTensor,
 	shape = data.shape
 	num_groups = shape[-1] // group_size
 	data = data.view(shape[:-1] + (num_groups, group_size,))
-	data = data.to(torch.float16)
-	data = data * scale + mn 
+	data = data.to(scale.dtype)   # preserve caller dtype (bf16 or fp16)
+	data = data * scale + mn
 	return data.view(shape)
 
 
@@ -238,7 +238,7 @@ def dequantize_cache_pertoken(data_quant: torch.Tensor, scale: torch.Tensor, mn:
     scale_exp = scale.unsqueeze(-1).expand(-1, -1, -1, -1, group_size).reshape(B, nh, T, D)
     mn_exp    = mn   .unsqueeze(-1).expand(-1, -1, -1, -1, group_size).reshape(B, nh, T, D)
 
-    return (quant_ints.float() * scale_exp + mn_exp).to(torch.float16)
+    return (quant_ints.float() * scale_exp + mn_exp).to(scale_exp.dtype)
 
 
 def triton_quantize_and_pack_along_last_dim(data: torch.Tensor, group_size: int, bit: int):
