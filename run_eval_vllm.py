@@ -30,7 +30,8 @@ DEFAULT_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--model",       choices=["fp16", "fp8", "pertoken", "smoothkv", "kivi"], required=True)
+    p.add_argument("--model",       choices=["bf16", "fp16", "fp8", "pertoken", "smoothkv", "kivi"], required=True,
+                   help="bf16/fp16 are the same no-quant baseline (dtype=auto picks the model's native dtype)")
     p.add_argument("--task",        required=True,
                    help="e.g. truthfulqa_gen, coqa, gsm8k_32k, gpqa_diamond_cot_n_shot_32k, math500_32k")
     p.add_argument("--model_path",  default=DEFAULT_MODEL)
@@ -47,13 +48,16 @@ def parse_args():
     p.add_argument("--log_samples",   action="store_true",
                    help="Save per-item inputs/generations/targets to logs/<out_name>_samples.json "
                         "(needed for adaptive rerun of truncated items at higher max_gen_toks).")
+    p.add_argument("--apply_chat_template", action="store_true",
+                   help="Wrap the task prompt with the tokenizer's chat template. "
+                        "Qwen3/instruct models expect this; raw prompts underperform.")
     return p.parse_args()
 
 
 def install_method(args):
     """Patch vLLM's LlamaAttention with the requested fake-quant hook."""
-    if args.model == "fp16":
-        return  # no patch
+    if args.model in ("bf16", "fp16"):
+        return  # no patch — unquantized baseline
     if args.model == "fp8":
         patches.install_fp8(group_size=args.group_size)
     elif args.model == "pertoken":
@@ -68,9 +72,9 @@ def install_method(args):
 def output_name(args):
     t = args.task
     m = args.model_path.rstrip("/").split("/")[-1].lower()
-    suffix = ""
-    if args.model == "fp16":
-        return f"{t}_{m}_fp16_vllm"
+    chat = "_chat" if args.apply_chat_template else ""
+    if args.model in ("bf16", "fp16"):
+        return f"{t}_{m}_{args.model}{chat}_vllm"
     if args.model == "fp8":
         return f"{t}_{m}_fp8_g{args.group_size}_vllm"
     if args.model == "pertoken":
@@ -106,14 +110,22 @@ def main():
     print(f"  output → {out_path}")
     print(f"{'='*60}\n")
 
+    # All fake-quant paths default to eager on A100: fp8 cast fails to compile
+    # (sm_80 has no fp8e4nv), pertoken hangs during cudagraph capture
+    # (the Python pack loop + triton kernels don't play nicely with inductor).
+    # Only the unpatched baseline uses torch.compile.
+    # Override with NO_ENFORCE_EAGER=1 env to force CUDA graphs + torch.compile
+    # on the quant paths too — useful with newer vllm (0.20+) where fp8 compile
+    # works on sm_80, and worth probing for ~1.5-2x speedup.
+    enforce_eager = (args.model not in ("bf16", "fp16")) and not os.environ.get("NO_ENFORCE_EAGER")
     vllm_kwargs = dict(
         pretrained=args.model_path,
-        dtype="float16",
+        dtype="auto",   # respect model's native dtype (bfloat16 for Qwen3)
         tensor_parallel_size=args.tp,
         batch_size=args.batch_size,          # MUST equal max_num_seqs to saturate concurrency
         gpu_memory_utilization=0.70,
         max_num_seqs=args.max_num_seqs,
-        enforce_eager=False,
+        enforce_eager=enforce_eager,
         enable_prefix_caching=True,          # 5-shot prompts share a long prefix
         disable_log_stats=False,             # emit periodic "Running/Swapped/GPU KV cache usage"
                                              # so we can verify no preemption. LLM entrypoint
@@ -121,6 +133,13 @@ def main():
     )
     if args.max_model_len is not None:
         vllm_kwargs["max_model_len"] = args.max_model_len
+    # EXAONE-4.5 ships as Exaone4_5_ForConditionalGeneration (multimodal). The
+    # nuxlear/transformers fork is missing a video processor, so vLLM's mm-budget
+    # profiling crashes at engine init. We never feed images/videos for math/QA
+    # tasks, so disable mm to skip profiling. (Image processor stub also required:
+    # see transformers/models/exaone4_5/image_processing_exaone4_5.py.)
+    if "EXAONE-4.5" in args.model_path:
+        vllm_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
     lm = VLLM(**vllm_kwargs)
 
     gen_kwargs = None
