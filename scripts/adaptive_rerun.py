@@ -49,12 +49,53 @@ def parse_args():
     return p.parse_args()
 
 
+def _normalize_arguments(args):
+    """Normalize lm_eval's dict-form arguments to run_eval_vllm's list-of-lists.
+
+    Two known formats:
+      - run_eval_vllm.py:  [[prompt, gen_kwargs], ...]
+      - lm_eval --log_samples: {'gen_args_0': {'arg_0': prompt, 'arg_1': gen_kwargs}, ...}
+
+    Returns the list-of-lists form.
+    """
+    if isinstance(args, list):
+        return args
+    if isinstance(args, dict):
+        # Sort outer keys (gen_args_0, gen_args_1, ...) by trailing integer
+        outer_sorted = sorted(args.items(), key=lambda kv: int(kv[0].rsplit("_", 1)[-1]))
+        out = []
+        for _, sub in outer_sorted:
+            if isinstance(sub, dict):
+                inner_sorted = sorted(sub.items(), key=lambda kv: int(kv[0].rsplit("_", 1)[-1]))
+                out.append([v for _, v in inner_sorted])
+            elif isinstance(sub, (list, tuple)):
+                out.append(list(sub))
+            else:
+                out.append([sub])
+        return out
+    return []
+
+
+def _get_first_arg_pair(item):
+    """Return (prompt, gen_kwargs) from the item's first request, or (None, None)."""
+    args = _normalize_arguments(item.get("arguments", []))
+    if not args:
+        return None, None
+    first = args[0]
+    if not isinstance(first, (list, tuple)) or len(first) < 2:
+        return None, None
+    prompt, gk = first[0], first[1]
+    if not isinstance(gk, dict):
+        return prompt, None
+    return prompt, gk
+
+
 def detect_first_pass_mg(items):
     """Pull max_gen_toks from the first item's stored gen_kwargs."""
     for it in items:
-        args = it.get("arguments", [])
-        if args and len(args[0]) > 1 and isinstance(args[0][1], dict):
-            mg = args[0][1].get("max_gen_toks")
+        _, gk = _get_first_arg_pair(it)
+        if gk:
+            mg = gk.get("max_gen_toks")
             if mg:
                 return mg
     raise ValueError("could not detect first-pass max_gen_toks from samples")
@@ -95,9 +136,13 @@ def main():
             json.dump({task_key: []}, f)
         return
 
-    # Extract prompts + stop tokens
-    prompts = [it["arguments"][0][0] for it in truncated]
-    stop_lists = [it["arguments"][0][1].get("until", []) for it in truncated]
+    # Extract prompts + stop tokens (handles both lm_eval dict-form and list-form arguments)
+    prompts = []
+    stop_lists = []
+    for it in truncated:
+        prompt, gk = _get_first_arg_pair(it)
+        prompts.append(prompt)
+        stop_lists.append((gk or {}).get("until", []))
     # All items should share the same `until` within a task; use the first
     stop = stop_lists[0] if stop_lists else []
 
