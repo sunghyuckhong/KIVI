@@ -89,9 +89,13 @@ def main():
 
     tok = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
 
-    # Find truncated items (within 8 tokens of cap).
-    def _extract_gen_text(it):
-        r = it.get("filtered_resps") or it.get("resps") or []
+    # Find truncated items (within 8 tokens of cap). Must look at `resps`
+    # (raw generation) NOT `filtered_resps` — the latter is the post-filter
+    # extracted answer (e.g., "(A)" for gpqa) and is unrelated to whether
+    # the model hit the MG cap. Looking at filtered_resps under-counts
+    # truncations by ~360x on gpqa.
+    def _extract_raw_gen_text(it):
+        r = it.get("resps") or []
         if isinstance(r, list):
             r = r[0] if r else ""
         if isinstance(r, list):
@@ -100,7 +104,7 @@ def main():
 
     truncated_idx = []
     for i, it in enumerate(items):
-        txt = _extract_gen_text(it)
+        txt = _extract_raw_gen_text(it)
         n_tok = len(tok.encode(txt, add_special_tokens=False))
         if n_tok >= args.orig_mg - 8:
             truncated_idx.append(i)
@@ -141,7 +145,12 @@ def main():
         tensor_parallel_size=args.tp,
         gpu_memory_utilization=args.gpu_memory_utilization,
         max_num_seqs=args.max_num_seqs,
-        enforce_eager=(args.model not in ("bf16", "fp16")) and not os.environ.get("NO_ENFORCE_EAGER"),
+        enforce_eager=(
+            True if os.environ.get("FORCE_ENFORCE_EAGER")
+            else False if os.environ.get("NO_ENFORCE_EAGER")
+            else (tuple(map(int, vllm.__version__.split(".")[:2])) < (0, 20)
+                  and args.model not in ("bf16", "fp16"))
+        ),
         enable_prefix_caching=True,
     )
     if args.max_model_len is not None:
