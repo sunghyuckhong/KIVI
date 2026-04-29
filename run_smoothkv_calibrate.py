@@ -310,6 +310,21 @@ def main():
     print(f"Model: {num_layers} layers, {num_q_heads} Q heads, "
           f"{num_kv_heads} KV heads, head_dim={head_dim}")
 
+    # Detect Q/K-RMSNorm presence — relevant for downstream zero-runtime fusion:
+    # models with q_norm/k_norm (Qwen3, Qwen3-MoE, Olmo2, …) require head-uniform
+    # s_K because the gamma vectors q_norm.weight / k_norm.weight are shape
+    # (head_dim,) shared across heads, and pre-norm row scaling on qkv_proj does
+    # not survive RMSNorm. Models without q_norm/k_norm get full
+    # per-(kv_head, channel) granularity via direct W_K row scaling.
+    has_qk_norm = any(
+        hasattr(m, "q_norm") and hasattr(m, "k_norm")
+        and isinstance(getattr(m, "q_norm", None), torch.nn.Module)
+        and isinstance(getattr(m, "k_norm", None), torch.nn.Module)
+        for m in model.modules()
+    )
+    print(f"Q/K-RMSNorm: {has_qk_norm}  "
+          f"(zero-runtime fusion {'requires' if has_qk_norm else 'does NOT need'} head-uniform s_K)")
+
     collector = StatCollector(
         num_layers, num_kv_heads, num_q_heads, head_dim, device,
         samples_per_channel=args.samples_per_channel,
@@ -355,17 +370,13 @@ def main():
     beta = args.beta
 
     eps = 1e-5
+    # SmoothKV is invariant under any positive per-(layer, head) rescaling of
+    # s_K (the same factor cancels across K/=s_K and Q*=s_K), so the overall
+    # magnitude is a free parameter. We keep raw values — make_alpha_variants.py
+    # is the single source of truth for downstream s_K and never normalized.
     s_K = (collector.max_k.clamp(min=eps) ** alpha) / \
           (max_q_grouped.clamp(min=eps) ** (1 - alpha))
-    # Normalize s_K per (layer, head) so the geometric mean across channels = 1
-    # (prevents inflating range; keeps overall magnitude stable)
-    log_s_K = s_K.log()
-    s_K = (log_s_K - log_s_K.mean(dim=-1, keepdim=True)).exp()
-
-    # V-side: s_V[c] = max|V|[c]^beta, normalized per (layer, head)
     s_V = collector.max_v.clamp(min=eps) ** beta
-    log_s_V = s_V.log()
-    s_V = (log_s_V - log_s_V.mean(dim=-1, keepdim=True)).exp()
 
     # Save
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
@@ -384,6 +395,7 @@ def main():
         "num_layers": num_layers,
         "num_kv_heads": num_kv_heads,
         "head_dim": head_dim,
+        "has_qk_norm": has_qk_norm,
     }
     if collector.samples_k is not None:
         payload["samples_k"] = collector.samples_k       # (L, nh, D, R) fp16 CPU
