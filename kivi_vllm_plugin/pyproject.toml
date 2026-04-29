@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kivi-vllm-plugin"
+version = "0.1.0"
+description = "KIVI fake-quant patch for vLLM Attention.forward (FP8/INT4/SmoothKV)"
+
+[project.entry-points."vllm.general_plugins"]
+kivi_kv_quant = "kivi_plugin:install_kv_quant"
+
+[tool.setuptools]
+py-modules = ["kivi_plugin"]
