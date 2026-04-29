@@ -51,6 +51,9 @@ def parse_args():
     p.add_argument("--apply_chat_template", action="store_true",
                    help="Wrap the task prompt with the tokenizer's chat template. "
                         "Qwen3/instruct models expect this; raw prompts underperform.")
+    p.add_argument("--num_fewshot", type=int, default=None,
+                   help="Override task's num_fewshot. Useful for tasks like gpqa whose "
+                        "_n_shot YAML doesn't actually specify a shot count (defaults to 0).")
     return p.parse_args()
 
 
@@ -73,6 +76,8 @@ def output_name(args):
     t = args.task
     m = args.model_path.rstrip("/").split("/")[-1].lower()
     chat = "_chat" if args.apply_chat_template else ""
+    shot = f"_{args.num_fewshot}shot" if args.num_fewshot is not None else ""
+    t = t + shot
     if args.model in ("bf16", "fp16"):
         return f"{t}_{m}_{args.model}{chat}_vllm"
     if args.model == "fp8":
@@ -110,14 +115,29 @@ def main():
     print(f"  output → {out_path}")
     print(f"{'='*60}\n")
 
-    # All fake-quant paths default to eager on A100: fp8 cast fails to compile
-    # (sm_80 has no fp8e4nv), pertoken hangs during cudagraph capture
-    # (the Python pack loop + triton kernels don't play nicely with inductor).
-    # Only the unpatched baseline uses torch.compile.
-    # Override with NO_ENFORCE_EAGER=1 env to force CUDA graphs + torch.compile
-    # on the quant paths too — useful with newer vllm (0.20+) where fp8 compile
-    # works on sm_80, and worth probing for ~1.5-2x speedup.
-    enforce_eager = (args.model not in ("bf16", "fp16")) and not os.environ.get("NO_ENFORCE_EAGER")
+    # Cudagraphs are on by default for ALL methods on vllm 0.20+ (EXAONE env)
+    # — verified ~20× throughput speedup. On older vllm (e.g. 0.8.5 in the qwen3
+    # env), the quant kernels' triton compile path is buggy and cudagraphs fail
+    # at engine init for fp8/pertoken/smoothkv. Detect the version and force eager
+    # on older vllm for non-bf16 paths. Set FORCE_ENFORCE_EAGER=1 to override
+    # explicitly; set NO_ENFORCE_EAGER=1 to skip even the version probe.
+    import vllm as _vllm
+    _vllm_major = int(_vllm.__version__.split(".")[0])
+    _vllm_minor = int(_vllm.__version__.split(".")[1])
+    _is_old_vllm = (_vllm_major, _vllm_minor) < (0, 20)
+    # fp8 specifically can't compile in cudagraph mode on sm_80 (A100/A6000):
+    # triton has no fp8e4nv codegen for that arch. Always force eager for fp8
+    # on sm_80 regardless of vllm version.
+    import torch
+    _sm = torch.cuda.get_device_capability(0) if torch.cuda.is_available() else (0, 0)
+    _fp8_sm80_block = (args.model == "fp8" and _sm == (8, 0))
+    if os.environ.get("FORCE_ENFORCE_EAGER"):
+        enforce_eager = True
+    elif os.environ.get("NO_ENFORCE_EAGER"):
+        enforce_eager = False
+    else:
+        # Default: cudagraphs ON for vllm 0.20+ (except fp8 on sm_80), eager for older
+        enforce_eager = _fp8_sm80_block or (_is_old_vllm and (args.model not in ("bf16", "fp16")))
     vllm_kwargs = dict(
         pretrained=args.model_path,
         dtype="auto",   # respect model's native dtype (bfloat16 for Qwen3)
@@ -146,7 +166,7 @@ def main():
     if args.max_gen_toks is not None:
         gen_kwargs = f"max_gen_toks={args.max_gen_toks}"
 
-    results = simple_evaluate(
+    se_kwargs = dict(
         model=lm,
         tasks=[args.task],
         batch_size=args.batch_size,
@@ -155,6 +175,16 @@ def main():
         task_manager=tm,
         limit=args.limit,
     )
+    if args.num_fewshot is not None:
+        se_kwargs["num_fewshot"] = args.num_fewshot
+    if args.apply_chat_template:
+        # lm_eval 0.4.5+: wrap doc_to_text in the tokenizer's chat template
+        # (enable_thinking=True by default for Qwen3 — model produces <think>...</think>
+        # then answer). fewshot_as_multiturn turns N-shot demos into proper
+        # user/assistant turns rather than concatenating them in one user message.
+        se_kwargs["apply_chat_template"] = True
+        se_kwargs["fewshot_as_multiturn"] = True
+    results = simple_evaluate(**se_kwargs)
     print(lm_utils.make_table(results))
 
     os.makedirs("logs", exist_ok=True)
