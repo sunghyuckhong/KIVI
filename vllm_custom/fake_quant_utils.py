@@ -13,7 +13,11 @@ and reshape back. Result goes into vLLM's PagedAttention cache as FP16 — the
 """
 import torch
 
-from quant.fp8_quant import quantize_fp8 as _fp8_q, dequantize_fp8 as _fp8_dq
+from quant.fp8_quant import (
+    quantize_fp8 as _fp8_q,
+    dequantize_fp8 as _fp8_dq,
+    fake_quantize_dequantize_fp8 as _fp8_qdq,
+)
 from quant.new_pack import (
     quant_and_pack_kcache, unpack_and_dequant_kcache,
     quant_and_pack_vcache, unpack_and_dequant_vcache,
@@ -41,12 +45,16 @@ def _from_bnhtd(x4: torch.Tensor, orig_shape: torch.Size) -> torch.Tensor:
 @torch.no_grad()
 def fake_quantize_fp8(x: torch.Tensor, num_kv_heads: int, head_dim: int,
                       group_size: int = 128) -> torch.Tensor:
-    """Fake FP8 quant: quant→dequant round-trip at FP8 precision."""
+    """Fake FP8 quant: quant→dequant round-trip at FP8 E4M3 precision.
+
+    Internally dispatches via `fake_quantize_dequantize_fp8`:
+    - sm_89+ (Hopper, H100/H200): hardware torch.float8_e4m3fn cast (bit-exact)
+    - sm_80 (A100): software E4M3 rounding in fp32 (cudagraph-compatible)
+    """
     orig_shape = x.shape
     orig_dtype = x.dtype
     x4 = _to_bnhtd(x, num_kv_heads, head_dim)
-    uint8, scale = _fp8_q(x4, group_size=group_size)
-    out = _fp8_dq(uint8, scale, group_size=group_size)
+    out = _fp8_qdq(x4, group_size=group_size)
     return _from_bnhtd(out, orig_shape).to(orig_dtype)
 
 
