@@ -78,12 +78,14 @@ def output_name(args):
     chat = "_chat" if args.apply_chat_template else ""
     shot = f"_{args.num_fewshot}shot" if args.num_fewshot is not None else ""
     t = t + shot
+    # `chat` suffix is appended to the method portion for ALL methods so
+    # chat-templated runs don't collide with non-chat runs in the filename.
     if args.model in ("bf16", "fp16"):
         return f"{t}_{m}_{args.model}{chat}_vllm"
     if args.model == "fp8":
-        return f"{t}_{m}_fp8_g{args.group_size}_vllm"
+        return f"{t}_{m}_fp8_g{args.group_size}{chat}_vllm"
     if args.model == "pertoken":
-        return f"{t}_{m}_pertoken_int{args.bits}_g{args.group_size}_vllm"
+        return f"{t}_{m}_pertoken_int{args.bits}_g{args.group_size}{chat}_vllm"
     if args.model == "smoothkv":
         stem = os.path.basename(args.calib_path).replace(".pt", "")
         # strip "smoothkv_<model>_" prefix
@@ -92,9 +94,9 @@ def output_name(args):
             calib_tag = stem[idx:].lstrip("_")
         except ValueError:
             calib_tag = stem
-        return f"{t}_{m}_smoothkv_g{args.group_size}_{calib_tag}_vllm"
+        return f"{t}_{m}_smoothkv_g{args.group_size}_{calib_tag}{chat}_vllm"
     if args.model == "kivi":
-        return f"{t}_{m}_kivi_res128_vllm"
+        return f"{t}_{m}_kivi_res128{chat}_vllm"
     raise ValueError(f"unknown model {args.model}")
 
 
@@ -125,19 +127,16 @@ def main():
     _vllm_major = int(_vllm.__version__.split(".")[0])
     _vllm_minor = int(_vllm.__version__.split(".")[1])
     _is_old_vllm = (_vllm_major, _vllm_minor) < (0, 20)
-    # fp8 specifically can't compile in cudagraph mode on sm_80 (A100/A6000):
-    # triton has no fp8e4nv codegen for that arch. Always force eager for fp8
-    # on sm_80 regardless of vllm version.
-    import torch
-    _sm = torch.cuda.get_device_capability(0) if torch.cuda.is_available() else (0, 0)
-    _fp8_sm80_block = (args.model == "fp8" and _sm == (8, 0))
+    # fp8 sm_80 used to need eager (triton's fp8e4nv codegen unavailable on A100),
+    # but `quant/fp8_quant.py` now has a software E4M3 rounding path that's
+    # cudagraph-compatible on sm_80. So fp8 can use cudagraphs everywhere.
     if os.environ.get("FORCE_ENFORCE_EAGER"):
         enforce_eager = True
     elif os.environ.get("NO_ENFORCE_EAGER"):
         enforce_eager = False
     else:
-        # Default: cudagraphs ON for vllm 0.20+ (except fp8 on sm_80), eager for older
-        enforce_eager = _fp8_sm80_block or (_is_old_vllm and (args.model not in ("bf16", "fp16")))
+        # Default: cudagraphs ON for vllm 0.20+, eager for older quant paths.
+        enforce_eager = _is_old_vllm and (args.model not in ("bf16", "fp16"))
     vllm_kwargs = dict(
         pretrained=args.model_path,
         dtype="auto",   # respect model's native dtype (bfloat16 for Qwen3)
