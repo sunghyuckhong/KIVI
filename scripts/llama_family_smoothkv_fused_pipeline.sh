@@ -1,6 +1,7 @@
 #!/bin/bash
-# 3-pass adaptive pipeline for zero-runtime SmoothKV (smoothkv_fused) on the
-# Llama family (Llama-3-8B-Instruct, Mistral-7B-Instruct-v0.2, DSR1-Distill).
+# 3-pass adaptive pipeline for zero-runtime SmoothKV (smoothkv_fused) across
+# the Llama family (Path A — direct qkv_proj row scaling) and the Qwen3 family
+# (Path B — q_norm/k_norm gamma fold, head-uniform calib).
 #
 #   Pass 1: lm_eval --log_samples at reduced MG via kivi_plugin (smoothkv_fused)
 #           → JSONL samples
@@ -10,10 +11,14 @@
 #   Pass 3: merge_rerun.py — re-applies lm_eval's filter chain on the merged
 #           samples and reports the corrected score
 #
-# Usage: llama_family_smoothkv_fused_pipeline.sh <model_short> <gpu> <calib_path>
-#   model_short ∈ {llama3-8b-instruct, mistral-7b-instruct-v0.2, dsr1-distill-llama-8b}
+# Usage: llama_family_smoothkv_fused_pipeline.sh <model_short> <gpu_or_pair> <calib_path>
+#   model_short ∈ {llama3-8b-instruct, mistral-7b-instruct-v0.2,
+#                  dsr1-distill-llama-8b, qwen3-32b, qwen3-30b-a3b}
+#   gpu_or_pair: single index for TP=1 (e.g. "0"), comma-sep pair for TP=2
+#                ("2,3"). The script writes the kivi config to
+#                /tmp/kivi_active_${gpu_or_pair}.json.
 #
-# All three passes run on the SAME GPU sequentially per task. Multiple tasks
+# All three passes run on the SAME GPU(s) sequentially per task. Multiple tasks
 # for one model are sequential too — launch separate invocations for parallel
 # task streams across GPUs.
 set -u
@@ -70,6 +75,33 @@ case "$MODEL_SHORT" in
     BS=2048
     TP=1
     ;;
+  qwen3-32b)
+    # Path B: q_norm/k_norm fusion. Calib must be `_huk_halfpair`.
+    MODEL=Qwen/Qwen3-32B
+    MODEL_TAG=qwen3_32b
+    OUT_TAG=qwen3-32b
+    MG_PASS1=8192
+    MG_PASS2=32768      # ctx 40k > 32k → cap at 32k
+    MAX_MODEL_LEN1=11648
+    MAX_MODEL_LEN2=35840
+    MAX_NS=24
+    BS=2048
+    TP=2
+    ;;
+  qwen3-30b-a3b)
+    # Path B: q_norm/k_norm fusion. Calib must be `_huk_halfpair`.
+    # MoE: 30B total, 3B activated — KV per request is small, more concurrency.
+    MODEL=Qwen/Qwen3-30B-A3B
+    MODEL_TAG=qwen3_30b_a3b
+    OUT_TAG=qwen3-30b-a3b
+    MG_PASS1=8192
+    MG_PASS2=32768
+    MAX_MODEL_LEN1=11648
+    MAX_MODEL_LEN2=35840
+    MAX_NS=48
+    BS=2048
+    TP=2
+    ;;
   *) echo "unknown model_short: $MODEL_SHORT"; exit 2 ;;
 esac
 
@@ -94,6 +126,23 @@ run_task_pipeline() {
   local rerun_json=logs/llama_family_results/mg32k/${OUT_TAG}_${LABEL}_${task}_samples_rerun.json
   local merged_json=logs/llama_family_results/mg32k/${OUT_TAG}_${LABEL}_${task}_pass1_samples_merged.json
 
+  # Chat-template policy: default ON. Disable only for Llama-3 + math500_32k.
+  #
+  # math500_32k uses a 4-shot Minerva self-completing prompt
+  # (`Problem: ... Solution: ... Final Answer: X. I hope it is correct.`)
+  # that the model is meant to *continue*. Llama-3-8B-Instruct, when given
+  # this prompt wrapped in chat template, switches to "assistant" mode and
+  # emits `\boxed{...}` instead of the Minerva format — which the default
+  # `process_results` (Minerva-only regex) scores 0 on. With chat template
+  # bf16 math500 dropped 0.284 -> 0.036, while WITHOUT chat template it
+  # holds at 0.284. Mistral / Qwen3 do NOT exhibit this behavior — they
+  # continue the Minerva pattern even when chat-wrapped, so we leave
+  # chat-template ON for them across all tasks.
+  local APPLY_CHAT="--apply_chat_template"
+  if [ "$MODEL_SHORT" = "llama3-8b-instruct" ] && [ "$task" = "math500_32k" ]; then
+    APPLY_CHAT=""
+  fi
+
   mkdir -p "$outdir"
   {
     echo "============================================="
@@ -110,7 +159,7 @@ run_task_pipeline() {
           --model vllm \
           --model_args "pretrained=${MODEL},dtype=bfloat16,tensor_parallel_size=${TP},gpu_memory_utilization=0.85,max_model_len=${MAX_MODEL_LEN1},max_num_seqs=${MAX_NS},enable_prefix_caching=True,enforce_eager=False" \
           --tasks "$task" \
-          --apply_chat_template --batch_size $BS --gen_kwargs "max_gen_toks=${MG_PASS1}" \
+          $APPLY_CHAT --batch_size $BS --gen_kwargs "max_gen_toks=${MG_PASS1}" \
           --log_samples --output_path "$outdir" \
           --include_path tasks
       rc=$?
