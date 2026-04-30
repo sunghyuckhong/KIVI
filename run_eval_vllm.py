@@ -30,8 +30,10 @@ DEFAULT_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--model",       choices=["bf16", "fp16", "fp8", "pertoken", "smoothkv", "kivi"], required=True,
-                   help="bf16/fp16 are the same no-quant baseline (dtype=auto picks the model's native dtype)")
+    p.add_argument("--model",       choices=["bf16", "fp16", "fp8", "pertoken", "smoothkv", "smoothkv_fused", "kivi"], required=True,
+                   help="bf16/fp16 are the same no-quant baseline (dtype=auto picks the model's native dtype). "
+                        "smoothkv_fused: gamma-fold s_K into q_norm/k_norm at load time (zero per-step "
+                        "cost beyond pertoken int4) — uses kivi_vllm_plugin via /tmp/kivi_active_<GPU>.json.")
     p.add_argument("--task",        required=True,
                    help="e.g. truthfulqa_gen, coqa, gsm8k_32k, gpqa_diamond_cot_n_shot_32k, math500_32k")
     p.add_argument("--model_path",  default=DEFAULT_MODEL)
@@ -68,6 +70,21 @@ def install_method(args):
     elif args.model == "smoothkv":
         assert args.calib_path, "--calib_path required for smoothkv"
         patches.install_smoothkv(args.calib_path, group_size=args.group_size, bits=args.bits)
+    elif args.model == "smoothkv_fused":
+        # Zero-runtime-cost path: write per-GPU JSON config; kivi_vllm_plugin
+        # (auto-loaded as a vllm.general_plugins entry point) reads it and
+        # calls fuse_smoothkv_into_model on Worker.load_model. Per-step
+        # Attention.forward then runs only plain pertoken int4.
+        assert args.calib_path, "--calib_path required for smoothkv_fused"
+        visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        cfg_path = f"/tmp/kivi_active_{visible}.json"
+        cfg = {"method": "smoothkv_fused",
+               "calib_path": os.path.abspath(args.calib_path),
+               "group_size": args.group_size,
+               "bits": args.bits}
+        with open(cfg_path, "w") as f:
+            json.dump(cfg, f)
+        print(f"  [smoothkv_fused] wrote {cfg_path}: {cfg}")
     elif args.model == "kivi":
         patches.install_kivi2(group_size=32, residual=128)
 
@@ -95,6 +112,14 @@ def output_name(args):
         except ValueError:
             calib_tag = stem
         return f"{t}_{m}_smoothkv_g{args.group_size}_{calib_tag}{chat}_vllm"
+    if args.model == "smoothkv_fused":
+        stem = os.path.basename(args.calib_path).replace(".pt", "")
+        try:
+            idx = stem.lower().index(m) + len(m)
+            calib_tag = stem[idx:].lstrip("_")
+        except ValueError:
+            calib_tag = stem
+        return f"{t}_{m}_smoothkv_fused_g{args.group_size}_{calib_tag}{chat}_vllm"
     if args.model == "kivi":
         return f"{t}_{m}_kivi_res128{chat}_vllm"
     raise ValueError(f"unknown model {args.model}")
