@@ -59,8 +59,37 @@ def parse_args():
     return p.parse_args()
 
 
+def _clear_stale_plugin_cfg():
+    """Remove any /tmp/kivi_active_<GPU>.json that could leak into this run.
+
+    The kivi_vllm_plugin auto-loads on every vLLM startup and reads
+    /tmp/kivi_active_<CUDA_VISIBLE_DEVICES>.json unconditionally. If a stale
+    cfg from a prior smoothkv_fused run is still on disk, the plugin will
+    silently override Attention.forward to apply that method — contaminating
+    bf16/fp8/pertoken runs with int4 quant + SmoothKV fusion.
+
+    This deletes the cfg matching the current CUDA_VISIBLE_DEVICES (and any
+    pair-form like "0,1") at the start of every run. install_method() then
+    re-writes the cfg only for smoothkv_fused.
+    """
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    candidates = {
+        f"/tmp/kivi_active_{visible}.json",
+        f"/tmp/kivi_active_{visible.replace(',', '')}.json",
+    }
+    for p in candidates:
+        if os.path.exists(p):
+            os.remove(p)
+            print(f"  [plugin-guard] removed stale {p}")
+
+
 def install_method(args):
     """Patch vLLM's LlamaAttention with the requested fake-quant hook."""
+    # ALWAYS clear any stale per-GPU plugin cfg before installing anything.
+    # Without this, a leftover cfg from a previous smoothkv_fused run silently
+    # contaminates the current run via the auto-loaded kivi_vllm_plugin.
+    _clear_stale_plugin_cfg()
+
     if args.model in ("bf16", "fp16"):
         return  # no patch — unquantized baseline
     if args.model == "fp8":

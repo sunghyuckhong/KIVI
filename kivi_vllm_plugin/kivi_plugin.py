@@ -1,7 +1,17 @@
-"""KIVI plugin — reads config from /tmp/kivi_active.json (workers strip env vars)."""
+"""KIVI plugin — reads config from /tmp/kivi_active.json (workers strip env vars).
+
+CONTAMINATION GUARD: this plugin auto-loads on every vLLM startup via
+the `vllm.general_plugins` entry-point. If a stale `/tmp/kivi_active_<GPU>.json`
+is on disk from a previous smoothkv_fused run, the plugin would silently
+override Attention.forward — contaminating bf16/fp8/pertoken runs with int4
+quant + SmoothKV fusion. Callers (run_eval_vllm.py and adaptive_pass2_qwen3.py)
+must clear the cfg file at the start of every run via _clear_stale_plugin_cfg();
+this plugin additionally STAMPS to stdout when it patches so contamination is
+visible in the eval log."""
 import os
 import re
 import json
+import sys
 
 
 def install_kv_quant():
@@ -23,10 +33,16 @@ def install_kv_quant():
         return
 
     pid = os.getpid()
+    # Loud stamp to stdout so contamination is visible in the eval log,
+    # not just /tmp/kivi_plugin_calls.log.
+    banner = (f"[KIVI-PLUGIN] pid={pid} CUDA_VISIBLE_DEVICES={visible!r} "
+              f"loading cfg={cfg_path} method={method}\n"
+              f"[KIVI-PLUGIN] this WILL override Attention.forward globally — "
+              f"if you didn't intend smoothkv_fused, your eval is contaminated.")
+    print(banner, file=sys.stderr, flush=True)
     with open("/tmp/kivi_plugin_calls.log", "a") as f:
         f.write(f"plugin called pid={pid} method={method} cfg={cfg_path}\n")
 
-    import sys
     # Resolve repo root from KIVI_REPO_ROOT env, the cfg's calib_path, or fall back
     # to the legacy hardcoded path (kept for back-compat with the old pod layout).
     _repo_root = os.environ.get("KIVI_REPO_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(cfg.get("calib_path", ""))))
