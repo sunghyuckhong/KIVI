@@ -1,0 +1,280 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{tikz}
+\usetikzlibrary{positioning,fit,shapes.geometric}
+
+\hypersetup{colorlinks=true, linkcolor=blue, urlcolor=blue}
+
+\title{SmoothKV Fusion: \texttt{qk\_norm} vs.\ Non-\texttt{qk\_norm} Models}
+\author{KIVI / SmoothKV port to vLLM}
+\date{\today}
+
+\newcommand{\sk}{\mathbf{s}_K}
+\newcommand{\sv}{\mathbf{s}_V}
+\newcommand{\K}{\mathbf{K}}
+\newcommand{\Q}{\mathbf{Q}}
+\newcommand{\V}{\mathbf{V}}
+
+\begin{document}
+\maketitle
+
+\section{Setup and notation}
+
+For a given decoder layer, denote the per-head dimension by $D$ (e.g., $D=128$ for Qwen3),
+the number of query heads by $H_Q$, and the number of key/value heads by $H_{KV}$ (so
+$H_Q=H_{KV}$ for plain MHA, and $H_Q > H_{KV}$ for GQA, with replication factor
+$r = H_Q/H_{KV}$).
+
+The standard attention block on a single query position computes
+\begin{equation}
+\mathrm{Attn}(\Q, \K, \V)
+\;=\; \mathrm{softmax}\!\left(\frac{\Q \K^\top}{\sqrt{D}}\right)\V .
+\label{eq:attn}
+\end{equation}
+
+\textbf{SmoothKV}~\cite{smoothkv} migrates per-channel magnitude imbalance off
+$\K$ (and optionally $\V$) so that downstream per-token int4 quantization sees
+flatter K/V tensors. With per-channel scales $\sk \in \mathbb{R}^{D}$ and
+$\sv \in \mathbb{R}^{D}$ (broadcasting per head), the fake-quant model is
+\begin{equation}
+\tilde{\K} \;=\; \big(\K / \sk\big) \cdot \sk, \qquad
+\tilde{\V} \;=\; \big(\V / \sv\big) \cdot \sv,
+\label{eq:smoothkv-fakequant}
+\end{equation}
+where the $/\sk$ step happens \emph{before} int4 quant, and the $\cdot \sk$
+step happens \emph{after} dequant. Equation~(\ref{eq:smoothkv-fakequant})
+is exactly equivalent to the un-smoothed identity at full precision; the
+quantization error is absorbed across rebalanced channels.
+
+For zero per-step runtime cost, we want to fold the $/\sk$ and $\cdot\sk$
+factors into the surrounding model weights at load time. Where exactly we
+fold depends on whether the architecture inserts an RMSNorm between
+\texttt{qkv\_proj} and RoPE.
+
+\section{Two architectural families}
+
+\subsection*{Family A: no \texttt{qk\_norm}}
+
+This is the older / vanilla pattern (Llama-2/3, Mistral, DSR1-Distill,
+Qwen2). The forward path is:
+\begin{equation}
+h \;\longrightarrow\; \mathrm{qkv\_proj}
+   \;\longrightarrow\; \text{reshape}
+   \;\longrightarrow\; \mathrm{RoPE}
+   \;\longrightarrow\; \text{cache } \K
+\label{eq:path-A}
+\end{equation}
+RoPE applies a per-channel rotation to a pair of channels; importantly,
+no normalization sits between \texttt{qkv\_proj} and RoPE.
+
+\subsection*{Family B: with \texttt{qk\_norm}}
+
+This is the newer pattern adopted by Qwen3 / Qwen3-MoE / Olmo2. Each head's
+$\Q$ and $\K$ pass through an RMSNorm \emph{before} RoPE:
+\begin{equation}
+h \;\longrightarrow\; \mathrm{qkv\_proj}
+   \;\longrightarrow\; \text{reshape}
+   \;\longrightarrow\; \mathrm{q\_norm} / \mathrm{k\_norm}
+   \;\longrightarrow\; \mathrm{RoPE}
+   \;\longrightarrow\; \text{cache } \K
+\label{eq:path-B}
+\end{equation}
+The norm weights $\boldsymbol{\gamma}_q, \boldsymbol{\gamma}_k \in \mathbb{R}^{D}$
+are \emph{shared across all heads}---each per-head $\Q$ slice gets the same
+$\boldsymbol{\gamma}_q$ multiplied elementwise after the RMS normalization.
+This shape constraint will dictate the entire fusion strategy below.
+
+\section{Constraint 1: RoPE pair-equality}
+
+RoPE applies a $2\!\times\!2$ rotation to channel pairs. Two conventions
+appear in the wild:
+\begin{itemize}
+  \item \textbf{Adjacent (GPTNeoX / KIVI-original Llama-2):} the pair is
+    $(c, c+1)$, $c$ even; the rotation acts on $(K_c, K_{c+1})$ as a 2D vector.
+  \item \textbf{rotate\_half (Llama-3 / Mistral / Qwen2 / Qwen3 / DSR1):} the
+    pair is $(c, c+D/2)$; the rotation acts on $(K_c, K_{c+D/2})$.
+\end{itemize}
+
+For elementwise pre-RoPE scaling by $\sk$ to commute with RoPE---which we
+\emph{need} because Eq.~(\ref{eq:smoothkv-fakequant}) divides by $\sk$
+\emph{after} RoPE---we must have
+\begin{equation}
+\sk[c] = \sk[c'] \quad \text{for every RoPE-paired }(c,c') .
+\label{eq:pair-equal}
+\end{equation}
+That is:
+\begin{itemize}
+  \item adjacent-RoPE models: enforce $\sk[2i] = \sk[2i+1]$. \texttt{make\_alpha\_variants.py --pair\_max\_k}.
+  \item rotate\_half-RoPE models: enforce $\sk[i] = \sk[i+D/2]$. \texttt{make\_alpha\_variants.py --half\_pair\_max\_k}.
+\end{itemize}
+
+Both reduce the effective resolution of $\sk$ to $D/2$ \emph{distinct}
+values per head per layer; the topology is just laid out differently.
+Modern models (Qwen3 family) use rotate\_half, so we use \textbf{halfpair}.
+
+\section{Constraint 2: where to fold $\sk$ and $\sv$}
+
+\subsection{Family A (no \texttt{qk\_norm}): fold into \texttt{qkv\_proj} rows}
+
+\texttt{qkv\_proj} is a single matrix whose output is split as
+$[\Q\text{-block}, \K\text{-block}, \V\text{-block}]$ along the
+output dim. Since \emph{no} normalization sits between \texttt{qkv\_proj}
+and RoPE, any per-channel multiplier on a row of \texttt{qkv\_proj}
+survives directly to post-RoPE $\K$.
+
+We absorb (using row-wise broadcasting):
+\begin{align}
+W_{\mathrm{qkv}}[\text{rows of } \K] &\mathrel{/{=}} \sk \nonumber \\
+W_{\mathrm{qkv}}[\text{rows of } \Q] &\mathrel{*{=}} \sk^{(r)}
+   && \text{(broadcast over GQA replication factor $r$)} \nonumber \\
+W_{\mathrm{qkv}}[\text{rows of } \V] &\mathrel{/{=}} \sv \nonumber \\
+W_{\mathrm{o}}[\text{cols}]          &\mathrel{*{=}} \sv^{(r)}
+\label{eq:fold-A}
+\end{align}
+Crucially, $\sk$ here may be \emph{per-($H_{KV}$, $D$)}---each $\K$ head
+has its own $D$-dim row, applied to its own slice of $W_{\mathrm{qkv}}$.
+After the rotate\_half / adjacent constraint of Eq.~(\ref{eq:pair-equal}),
+the effective resolution is
+\begin{equation}
+\#\{\text{distinct } \sk \text{ values per layer (Family A)}\}
+\;=\; H_{KV} \cdot D/2 .
+\label{eq:resolution-A}
+\end{equation}
+For Qwen3-8B with $H_{KV}=8, D=128$: \textbf{$8 \cdot 64 = 512$} distinct
+$\sk$ values per layer.
+
+\subsection{Family B (with \texttt{qk\_norm}): fold into the gamma vectors}
+
+Now there is an RMSNorm between \texttt{qkv\_proj} and RoPE:
+\begin{equation}
+\K \;=\; \mathrm{RMSNorm}\!\big(\K_{\mathrm{proj}}\big) \odot \boldsymbol{\gamma}_k,
+\qquad \K_{\mathrm{proj}} \;=\; W_{\mathrm{qkv}}^{\K} h ,
+\end{equation}
+where $\odot$ denotes per-channel multiplication and $\boldsymbol{\gamma}_k
+\in \mathbb{R}^{D}$. \textbf{Any per-channel scaling on the rows of}
+$W_{\mathrm{qkv}}^{\K}$ \textbf{is destroyed by the RMS statistic}, because
+\begin{equation}
+\mathrm{RMSNorm}(\mathbf{s} \odot \mathbf{x}) \;\neq\; \mathbf{s} \odot \mathrm{RMSNorm}(\mathbf{x})
+\quad\text{when } \mathbf{s} \text{ varies along the norm axis.}
+\label{eq:rms-no-commute}
+\end{equation}
+The RMS denominator is itself a function of the rescaled vector, so the
+per-channel scaling does not pass through.
+
+Therefore we must fold \emph{post-norm}, into $\boldsymbol{\gamma}_k$ and
+$\boldsymbol{\gamma}_q$ themselves:
+\begin{equation}
+\boldsymbol{\gamma}_q \mathrel{*{=}} \sk, \qquad \boldsymbol{\gamma}_k \mathrel{/{=}} \sk .
+\label{eq:fold-B}
+\end{equation}
+
+\paragraph{Head-uniform constraint.} Both $\boldsymbol{\gamma}_q$ and
+$\boldsymbol{\gamma}_k$ have shape $(D,)$---\emph{they are shared across
+every head}. There is no per-head dimension to fold a per-head $\sk$ into.
+So the fused calib must satisfy
+\begin{equation}
+\sk^{(h_1)}[c] \;=\; \sk^{(h_2)}[c] \quad \forall h_1, h_2 \in \{1,\ldots,H_{KV}\},\ c \in \{1,\ldots,D\} .
+\label{eq:head-uniform}
+\end{equation}
+This is what the \texttt{--head\_uniform\_k} flag enforces: it reduces
+$\sk$ across the $H_{KV}$ axis (e.g., by max), then broadcasts the
+result back so the runtime tensor shape is unchanged but every head
+holds the same row.
+
+After head-uniform reduction \emph{and} the rotate\_half pair-equality
+constraint, the effective resolution becomes
+\begin{equation}
+\#\{\text{distinct } \sk \text{ values per layer (Family B)}\}
+\;=\; D/2 .
+\label{eq:resolution-B}
+\end{equation}
+For Qwen3-8B: \textbf{$64$} distinct $\sk$ values per layer---an
+\textbf{$8\times$} reduction in expressivity vs.\ Family A on the same
+architecture.
+
+\paragraph{V-side fusion is unchanged.} $\V$ has neither a normalization
+nor RoPE between \texttt{qkv\_proj} and the cache, so the V-side fold
+into \texttt{qkv\_proj} V-rows and \texttt{o\_proj} input columns
+(Eq.~\ref{eq:fold-A} last two lines) works identically for Family B
+without any head-uniform constraint. Only the K-side suffers the
+qk\_norm tax.
+
+\section{Summary table}
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+& Family A & Family B & \\
+& (no qk\_norm) & (qk\_norm) & \\
+& Llama-3, Mistral, & Qwen3, Qwen3-MoE, & \\
+& DSR1-Distill, Qwen2 & Olmo2 & \\
+\midrule
+Fold $\sk$ into & \texttt{qkv\_proj} rows & $\boldsymbol{\gamma}_q,\boldsymbol{\gamma}_k$ & \\
+Per-channel granularity? & yes & yes & \\
+Per-head granularity? & \textbf{yes} (per $H_{KV}$ heads) & \textbf{no} (head-uniform required) & \\
+Pair-equality (RoPE) & required & required & \\
+Distinct $\sk$ / layer & $H_{KV} \cdot D/2$ & $D/2$ & \\
+For Qwen3-8B ($H_{KV}=8, D=128$) & $512$ & $64$ ($8\times$ reduction) & \\
+V-side fold & qkv$\to$V rows + o$\to$cols & same as Family A & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Why the head-uniform tax is fundamental}
+
+It is tempting to ask: can we keep per-head $\sk$ on a Family-B model and
+fuse it somewhere else? The architectural shape of $\boldsymbol{\gamma}_k$
+is the rate-limiter:
+\begin{itemize}
+  \item Pre-norm rows of $W_{\mathrm{qkv}}^{\K}$ have shape
+    $(H_{KV} \cdot D)\times d_{\mathrm{model}}$. Folding here would let us
+    encode per-head $\sk$, but Eq.~(\ref{eq:rms-no-commute}) makes that
+    fusion non-equivalent to the runtime SmoothKV.
+  \item $\boldsymbol{\gamma}_k$ has shape $(D)$. There is no per-head dim
+    to absorb a per-head $\sk$ into.
+  \item The post-RoPE / pre-cache stage offers no other learnable weight
+    to fold into.
+\end{itemize}
+For zero-runtime cost on a qk\_norm model, the only deployable
+$\sk$ is one shared across heads. This is not a limitation of the
+SmoothKV calibration---it is a constraint of the architecture itself.
+
+\section{Practical implications for KIVI / vLLM}
+
+\begin{enumerate}
+  \item Calibration scripts (\texttt{run\_smoothkv\_calibrate.py},
+    \texttt{make\_alpha\_variants.py}, \texttt{make\_percentile\_variants.py})
+    auto-detect \texttt{qk\_norm} from the loaded model (presence of
+    \texttt{q\_norm} / \texttt{k\_norm} sub-modules) and apply
+    \texttt{--head\_uniform\_k} by default for Family B.
+  \item The deployed fusion lives in
+    \texttt{kivi\_vllm\_plugin/smoothkv\_fusion.py:fuse\_smoothkv\_into\_model}.
+    It branches on \texttt{hasattr(module, "q\_norm") and hasattr(module,
+    "k\_norm")} to choose Path A vs.\ Path B.
+  \item Filename conventions:
+    \begin{itemize}
+      \item Family A: \texttt{smoothkv\_<model>\_..\_a\{$\alpha$\}b\{$\beta$\}\_halfpair.pt}
+      \item Family B: \texttt{smoothkv\_<model>\_..\_a\{$\alpha$\}b\{$\beta$\}\_huk\_halfpair.pt}
+    \end{itemize}
+  \item For evaluation on Qwen3-8B, the deployable headline number on
+    minerva\_math500 (\texttt{math\_verify} metric, MG=32k retry) is
+    $0.9476$ for $\alpha\!=\!\beta\!=\!1$ puremax + halfpair + HUK,
+    matching or slightly beating BF16 ceiling at $0.9407$. The
+    accompanying gsm8k cost is $77.86\%$ strict vs.\ BF16's $86.81\%$,
+    a tax that the Family-A topology would not impose.
+\end{enumerate}
+
+\bibliographystyle{plain}
+\begin{thebibliography}{9}
+\bibitem{smoothkv}
+SmoothKV: percentile-based per-channel migration for KV-cache quantization. Internal note.
+\bibitem{smoothquant}
+Xiao, G.\ et al.\ ``SmoothQuant: Accurate and Efficient Post-Training Quantization for Large Language Models.'' \emph{ICML} 2023.
+\end{thebibliography}
+
+\end{document}
