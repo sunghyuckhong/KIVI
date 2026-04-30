@@ -27,8 +27,13 @@ def install_kv_quant():
         f.write(f"plugin called pid={pid} method={method} cfg={cfg_path}\n")
 
     import sys
-    if "/home/home-mcl/sunghyuck/kv_cache_compression/KIVI" not in sys.path:
-        sys.path.insert(0, "/home/home-mcl/sunghyuck/kv_cache_compression/KIVI")
+    # Resolve repo root from KIVI_REPO_ROOT env, the cfg's calib_path, or fall back
+    # to the legacy hardcoded path (kept for back-compat with the old pod layout).
+    _repo_root = os.environ.get("KIVI_REPO_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(cfg.get("calib_path", ""))))
+    if not (_repo_root and os.path.isdir(_repo_root)):
+        _repo_root = "/workspace/KIVI" if os.path.isdir("/workspace/KIVI") else "/home/home-mcl/sunghyuck/kv_cache_compression/KIVI"
+    if _repo_root not in sys.path:
+        sys.path.insert(0, _repo_root)
 
     from vllm_custom.fake_quant_utils import (
         fake_quantize_fp8 as fp8,
@@ -57,7 +62,7 @@ def install_kv_quant():
         def patched_load(self, *args, **kwargs):
             ret = orig_load(self, *args, **kwargs)
             import sys as _sys
-            _plugin_dir = "/home/home-mcl/sunghyuck/kv_cache_compression/KIVI/kivi_vllm_plugin"
+            _plugin_dir = os.path.dirname(os.path.abspath(__file__))
             if _plugin_dir not in _sys.path:
                 _sys.path.insert(0, _plugin_dir)
             from smoothkv_fusion import fuse_smoothkv_into_model
