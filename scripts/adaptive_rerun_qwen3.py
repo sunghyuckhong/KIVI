@@ -122,7 +122,7 @@ def main():
         if args.quant_method == "fp8":
             patches.install_fp8(group_size=args.group_size)
         elif args.quant_method == "pertoken":
-            patches.install_pertoken_int4(group_size=args.group_size, bits=args.bits)
+            patches.install_pertoken_int4(group_size=args.group_size)
         elif args.quant_method == "smoothkv":
             assert args.calib_path, "--calib_path required for smoothkv"
             patches.install_smoothkv(args.calib_path,
