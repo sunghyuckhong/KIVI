@@ -29,8 +29,12 @@ inside self.attn.
 """
 import torch
 
-import vllm.model_executor.models.qwen3 as _vllm_qwen3
-import vllm.model_executor.models.qwen2 as _vllm_qwen2
+from vllm.model_executor.models.qwen3 import Qwen3Attention
+from vllm.model_executor.models.qwen2 import Qwen2Attention
+from vllm.model_executor.models.qwen3_moe import Qwen3MoeAttention
+from vllm.model_executor.models.exaone4 import Exaone4Attention
+from vllm.model_executor.models.llama import LlamaAttention
+from vllm.model_executor.models.mistral import MistralAttention
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm_custom.fake_quant_utils import (
     fake_quantize_fp8,
@@ -40,33 +44,80 @@ from vllm_custom.fake_quant_utils import (
 )
 
 
-def _build_attn_classes():
-    classes = [_vllm_qwen3.Qwen3Attention, _vllm_qwen2.Qwen2Attention]
-    try:
-        import vllm.model_executor.models.qwen3_moe as _vllm_qwen3_moe
-        classes.append(_vllm_qwen3_moe.Qwen3MoeAttention)
-    except ImportError:
-        pass
-    try:
-        import vllm.model_executor.models.exaone4 as _vllm_exaone4
-        classes.append(_vllm_exaone4.Exaone4Attention)
-    except ImportError:
-        pass
-    return tuple(classes)
-
-
-# Per-class originals so install/restore covers every supported attention path.
-# Qwen2 has no qk-norm (added in Qwen3/Exaone4); Exaone4 hybrid configs skip
-# RoPE on full-attention layers. The patched forward probes for those at runtime.
-_ATTN_CLASSES = _build_attn_classes()
+# Attention classes supported by install_*(). To add a new model, import its
+# Attention class above and append it here. The patched forward handles
+# qk-norm and RoPE policy at runtime via attribute probes (`_apply_qk_norm`,
+# `_apply_rope_if_needed`), so the same forward works for every class.
+_ATTN_CLASSES = (
+    Qwen3Attention,
+    Qwen2Attention,
+    Qwen3MoeAttention,
+    Exaone4Attention,
+    LlamaAttention,
+    MistralAttention,
+)
 _ORIG_FORWARD: dict = {}
 _ORIG_INIT: dict = {}
 
 
 def _ensure_original_saved():
+    _wipe_compile_cache()
     for cls in _ATTN_CLASSES:
         if cls not in _ORIG_FORWARD:
             _ORIG_FORWARD[cls] = cls.forward
+    _install_postload_assertion()
+
+
+def _wipe_compile_cache():
+    """Delete vLLM's torch.compile cache before any install_*() runs.
+
+    The cache stores compiled forward bytecode keyed by model+dtype+config.
+    If a bf16 run populated the cache, a subsequent fp8/pertoken/smoothkv run
+    will load that cached compiled graph — which has the UNPATCHED forward
+    baked in — and silently skip the quant patch even though `cls.forward`
+    has been replaced. Wiping the cache forces a fresh compile that captures
+    the patched forward. Cost: ~2-3 min per run to rebuild.
+    """
+    import os, shutil
+    cache_dir = os.path.expanduser("~/.cache/vllm/torch_compile_cache")
+    if os.path.exists(cache_dir):
+        try:
+            shutil.rmtree(cache_dir)
+            print(f"[vllm_custom.patches] wiped {cache_dir} (forces fresh compile)")
+        except OSError as e:
+            print(f"[vllm_custom.patches] WARNING could not wipe {cache_dir}: {e}")
+
+
+def _install_postload_assertion():
+    """Patch Worker.load_model so that AFTER the model loads, we count attention
+    modules whose class is in _ATTN_CLASSES. If zero, the install_*() patch is a
+    silent no-op for this model — raise so the run fails loudly instead of
+    pretending to quantize while actually running bf16."""
+    try:
+        from vllm.v1.worker.gpu_worker import Worker
+    except ImportError:
+        return  # vLLM <0.19 — different worker layout; skip the check
+    if getattr(Worker, "_kivi_postload_patched", False):
+        return
+    orig_load = Worker.load_model
+
+    def patched_load(self, *args, **kwargs):
+        ret = orig_load(self, *args, **kwargs)
+        model = self.model_runner.model
+        n = sum(1 for m in model.modules() if isinstance(m, _ATTN_CLASSES))
+        if n == 0:
+            names = [c.__name__ for c in _ATTN_CLASSES]
+            raise RuntimeError(
+                f"[vllm_custom.patches] FAIL-LOUD: 0 attention modules in the loaded "
+                f"model match the patched classes {names}. Quantization is a silent "
+                f"no-op. Add the model's attention class to _build_attn_classes() in "
+                f"vllm_custom/patches.py."
+            )
+        print(f"[vllm_custom.patches] post-load assertion: {n} attention modules patched")
+        return ret
+
+    Worker.load_model = patched_load
+    Worker._kivi_postload_patched = True
 
 
 def _apply_qk_norm(self, q, k):
