@@ -83,12 +83,39 @@ def _clear_stale_plugin_cfg():
             print(f"  [plugin-guard] removed stale {p}")
 
 
+def _clear_stale_compile_cache():
+    """Wipe vLLM's torch.compile cache so the patched Qwen3Attention.forward
+    is captured fresh.
+
+    vLLM's `/root/.cache/vllm/torch_compile_cache/<hash>/...` directories are
+    keyed off the FX graph hash of the unpatched-then-patched forward. In
+    practice we've observed the same hash directory being reused across
+    variants (e.g. bf16/gpqa and smk/gpqa both got `1d151cc93d/`), which means
+    the second variant loaded the FIRST variant's compiled graph and the
+    runtime monkey-patch never made it into the captured kernels.
+
+    Wiping the cache before every run forces a fresh compile that captures
+    install_<variant>()'s replaced forward. Costs ~30-90 sec of compile
+    time but eliminates the silent-bypass risk.
+    """
+    import shutil
+    cache_dir = os.path.expanduser("~/.cache/vllm/torch_compile_cache")
+    if os.path.isdir(cache_dir):
+        shutil.rmtree(cache_dir, ignore_errors=True)
+        print(f"  [compile-cache-guard] wiped {cache_dir} to force fresh compile")
+
+
 def install_method(args):
     """Patch vLLM's LlamaAttention with the requested fake-quant hook."""
     # ALWAYS clear any stale per-GPU plugin cfg before installing anything.
     # Without this, a leftover cfg from a previous smoothkv_fused run silently
     # contaminates the current run via the auto-loaded kivi_vllm_plugin.
     _clear_stale_plugin_cfg()
+    # ALSO wipe vLLM's torch.compile cache. Without this, a previous variant's
+    # compiled graph (e.g. bf16's) can be loaded for the current variant if
+    # vLLM's content-addressed cache hash collides — and the runtime monkey-
+    # patch never makes it into the captured kernels.
+    _clear_stale_compile_cache()
 
     if args.model in ("bf16", "fp16"):
         return  # no patch — unquantized baseline
