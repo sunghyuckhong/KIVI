@@ -78,9 +78,22 @@ def _clear_stale_plugin_cfg():
             print(f"  [plugin-guard] removed stale {p}")
 
 
+def _clear_stale_compile_cache():
+    """Wipe vLLM's torch.compile cache so the patched Qwen3Attention.forward
+    is captured fresh — vLLM's content-addressed cache hash has been seen
+    to collide across variants, silently loading another variant's compiled
+    graph and bypassing the runtime monkey-patch."""
+    import shutil
+    cache_dir = os.path.expanduser("~/.cache/vllm/torch_compile_cache")
+    if os.path.isdir(cache_dir):
+        shutil.rmtree(cache_dir, ignore_errors=True)
+        print(f"  [compile-cache-guard] wiped {cache_dir} to force fresh compile")
+
+
 def install_method(args):
-    # ALWAYS clear stale plugin cfg first.
+    # ALWAYS clear stale plugin cfg + compile cache first.
     _clear_stale_plugin_cfg()
+    _clear_stale_compile_cache()
 
     if args.model in ("bf16", "fp16"):
         return
