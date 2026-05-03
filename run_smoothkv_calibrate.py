@@ -55,6 +55,10 @@ def parse_args():
                    help="If >0, uniformly subsample this many abs values per "
                         "(layer, head, channel) for offline percentile calibration. "
                         "Adds 32*nh*D*R*2B CPU memory; 0 disables (max-only, backward-compat).")
+    p.add_argument("--apply_chat_template", action="store_true",
+                   help="If set, render each sample via tokenizer.apply_chat_template "
+                        "using the dataset's 'messages' column instead of raw 'text'. "
+                        "Required for chat-on eval distribution matching.")
     return p.parse_args()
 
 
@@ -333,27 +337,50 @@ def main():
     hooks = install_hooks(model, collector)
 
     print(f"Loading dataset: {args.dataset}")
-    if args.dataset_config:
+    # Local file support: a path ending in .json[l] is loaded via the 'json' loader.
+    if args.dataset.endswith(".jsonl") or args.dataset.endswith(".json"):
+        ds = load_dataset("json", data_files=args.dataset, split="train")
+    elif args.dataset_config:
         ds = load_dataset(args.dataset, args.dataset_config, split=args.split)
     else:
         ds = load_dataset(args.dataset, split=args.split)
 
-    print(f"Calibrating on {args.num_samples} samples at {args.seq_length} tokens...")
+    print(f"Calibrating on {args.num_samples} samples at {args.seq_length} tokens"
+          f"{' (chat-template applied)' if args.apply_chat_template else ''}...")
     with torch.no_grad():
         for i in tqdm(range(min(args.num_samples, len(ds)))):
             row = ds[i]
-            if args.text_columns:
-                parts = [str(row[c]) for c in args.text_columns if row.get(c)]
-                text = args.text_join.join(parts)
+            if args.apply_chat_template:
+                messages = row.get("messages")
+                if not messages:
+                    continue
+                tmpl = tokenizer.apply_chat_template(
+                    messages, tokenize=True, return_tensors="pt",
+                    truncation=True, max_length=args.seq_length,
+                    add_generation_prompt=False,
+                )
+                # Handle both Tensor and BatchEncoding return shapes
+                if hasattr(tmpl, "input_ids"):
+                    input_ids = tmpl.input_ids.to(device)
+                else:
+                    input_ids = tmpl.to(device)
+                enc = {"input_ids": input_ids,
+                       "attention_mask": torch.ones_like(input_ids)}
+                if input_ids.shape[1] < 16:
+                    continue
             else:
-                text = row[args.text_column]
-            if not text or not text.strip():
-                continue
-            enc = tokenizer(text, return_tensors="pt",
-                            truncation=True, max_length=args.seq_length,
-                            padding=False).to(device)
-            if enc.input_ids.shape[1] < 16:
-                continue  # skip tiny samples
+                if args.text_columns:
+                    parts = [str(row[c]) for c in args.text_columns if row.get(c)]
+                    text = args.text_join.join(parts)
+                else:
+                    text = row[args.text_column]
+                if not text or not text.strip():
+                    continue
+                enc = tokenizer(text, return_tensors="pt",
+                                truncation=True, max_length=args.seq_length,
+                                padding=False).to(device)
+                if enc.input_ids.shape[1] < 16:
+                    continue  # skip tiny samples
             model(**enc)
 
     for h in hooks:

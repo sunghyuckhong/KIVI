@@ -77,15 +77,46 @@ def _wipe_compile_cache():
     baked in — and silently skip the quant patch even though `cls.forward`
     has been replaced. Wiping the cache forces a fresh compile that captures
     the patched forward. Cost: ~2-3 min per run to rebuild.
+
+    Race-safe: parallel install_*() calls (e.g. wave of N quant cells) would
+    otherwise wipe the cache while siblings are mid-compile, deadlocking
+    everyone. We use an exclusive lockfile + per-launch sentinel so the
+    FIRST process wipes, the rest see the sentinel and skip.
     """
-    import os, shutil
+    import os, shutil, fcntl, time
     cache_dir = os.path.expanduser("~/.cache/vllm/torch_compile_cache")
-    if os.path.exists(cache_dir):
-        try:
-            shutil.rmtree(cache_dir)
-            print(f"[vllm_custom.patches] wiped {cache_dir} (forces fresh compile)")
-        except OSError as e:
-            print(f"[vllm_custom.patches] WARNING could not wipe {cache_dir}: {e}")
+    lock_dir = os.path.expanduser("~/.cache/vllm")
+    os.makedirs(lock_dir, exist_ok=True)
+    lock_path = os.path.join(lock_dir, ".kivi_wipe.lock")
+    # Per-launch sentinel: cleared by the launcher before each sweep wave.
+    # Within a single launch, the FIRST install_*() wipes; the rest no-op.
+    sentinel_path = os.path.join(lock_dir, ".kivi_wiped_this_launch")
+    launch_id = os.environ.get("KIVI_LAUNCH_ID", "default")
+
+    with open(lock_path, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        already = False
+        if os.path.exists(sentinel_path):
+            try:
+                if open(sentinel_path).read().strip() == launch_id:
+                    already = True
+            except OSError:
+                pass
+        if already:
+            print(f"[vllm_custom.patches] another process already wiped cache "
+                  f"this launch (pid {os.getpid()} skipping)")
+        else:
+            if os.path.exists(cache_dir):
+                try:
+                    shutil.rmtree(cache_dir)
+                except OSError as e:
+                    print(f"[vllm_custom.patches] WARNING could not wipe "
+                          f"{cache_dir}: {e}")
+                    return
+            with open(sentinel_path, "w") as sf:
+                sf.write(launch_id)
+            print(f"[vllm_custom.patches] wiped {cache_dir} "
+                  f"(pid {os.getpid()} owns sentinel for launch_id={launch_id})")
 
 
 def _install_postload_assertion():
@@ -114,10 +145,21 @@ def _install_postload_assertion():
                 f"vllm_custom/patches.py."
             )
         print(f"[vllm_custom.patches] post-load assertion: {n} attention modules patched")
+        # Run any registered post-load warmup hooks (smoothkv pre-moves calib
+        # scales to GPU here so the forward doesn't trigger a CPU→GPU memcpy
+        # during cudagraph stream capture, which causes
+        # cudaErrorStreamCaptureUnsupported).
+        for hook in _POSTLOAD_HOOKS:
+            hook(model)
         return ret
 
     Worker.load_model = patched_load
     Worker._kivi_postload_patched = True
+
+
+# Registered by install_smoothkv() so the worker can pre-move calib scales to
+# GPU before cudagraph capture begins.
+_POSTLOAD_HOOKS: list = []
 
 
 def _apply_qk_norm(self, q, k):
@@ -249,21 +291,68 @@ def install_smoothkv(calib_path: str, group_size: int = 128, bits: int = 4,
     _install_layer_idx_hook()
 
     calib = torch.load(calib_path, weights_only=True)
-    # calib layout: {"s_K": tensor[L, nh, D], "s_V": tensor[L, nh, D], ...}
-    # Store smoothing factors at model_dtype so K/V division and post-quant rescale
-    # stay in the model's native precision (no lossy cast chain per forward).
-    s_K_all = calib["s_K"].to(dtype).cuda()  # (num_layers, num_kv_heads, head_dim)
-    s_V_all = calib["s_V"].to(dtype).cuda()
+    # Keep scales on CPU here. Calling .cuda() in the main process before
+    # LLM(...) initializes CUDA, which forces vLLM to use multiprocess spawn
+    # for its workers. Spawn re-imports modules in the worker → the worker's
+    # LlamaAttention class never picks up the smoothkv_forward we install
+    # below → quant silently no-ops. We lazy-move to CUDA inside the forward
+    # (cached after first call) so CUDA is only initialized in the worker.
+    s_K_all_cpu = calib["s_K"].to(dtype)  # (num_layers, num_kv_heads, head_dim)
+    s_V_all_cpu = calib["s_V"].to(dtype)
+    _scales_gpu = {}  # layer_idx -> (sk_gpu, sv_gpu), filled by post-load hook
+
+    # Pre-warm scales onto each layer's GPU during Worker.load_model — BEFORE
+    # cudagraph capture begins. CUDA→GPU memcpy inside the captured forward
+    # raises cudaErrorStreamCaptureUnsupported, so we must move ahead of time.
+    # For TP>1, calib s_K has full_num_kv_heads but each worker only sees a
+    # slice → we shard along the kv_heads dim per tp_rank so the scale shape
+    # matches the per-worker key tensor.
+    def _warmup_scales(model):
+        try:
+            from vllm.distributed import get_tensor_model_parallel_rank
+            tp_rank = get_tensor_model_parallel_rank()
+        except Exception:
+            tp_rank = 0
+        full_kv_heads = s_K_all_cpu.shape[1]
+        for m in model.modules():
+            li = getattr(m, "_kivi_layer_idx", None)
+            if li is None:
+                continue
+            try:
+                dev = next(m.parameters()).device
+            except StopIteration:
+                continue
+            per_worker_kv = getattr(m, "num_kv_heads", full_kv_heads)
+            if per_worker_kv == full_kv_heads:
+                sk = s_K_all_cpu[li].to(dev)
+                sv = s_V_all_cpu[li].to(dev)
+            else:
+                lo = tp_rank * per_worker_kv
+                hi = lo + per_worker_kv
+                sk = s_K_all_cpu[li, lo:hi].to(dev)
+                sv = s_V_all_cpu[li, lo:hi].to(dev)
+            _scales_gpu[li] = (sk, sv)
+        print(f"[vllm_custom.patches] smoothkv warmup: pre-moved {len(_scales_gpu)} "
+              f"layer scales to GPU (cudagraph-safe, tp_rank={tp_rank}, "
+              f"per_worker_kv={per_worker_kv if _scales_gpu else '?'})")
+    _POSTLOAD_HOOKS.append(_warmup_scales)
 
     def _get_scales(self):
-        """Layer idx is stored by the __init__ hook as self._kivi_layer_idx."""
+        """Layer idx stashed by the __init__ hook; scales pre-moved by warmup."""
         layer_idx = getattr(self, "_kivi_layer_idx", None)
         if layer_idx is None:
             raise RuntimeError(
                 "SmoothKV: layer index unset. The __init__ hook must run before "
                 "model construction — call install_smoothkv() before LLM(...)."
             )
-        return s_K_all[layer_idx], s_V_all[layer_idx]
+        sk_sv = _scales_gpu.get(layer_idx)
+        if sk_sv is None:
+            raise RuntimeError(
+                f"SmoothKV: scales for layer {layer_idx} not pre-warmed. "
+                f"Worker.load_model post-load hook didn't run, or this layer's "
+                f"_kivi_layer_idx wasn't set."
+            )
+        return sk_sv
 
     def smoothkv_forward(self, positions, hidden_states):
         qkv, _ = self.qkv_proj(hidden_states)
@@ -271,7 +360,7 @@ def install_smoothkv(calib_path: str, group_size: int = 128, bits: int = 4,
         q, k = _apply_qk_norm(self, q, k)
         q, k = _apply_rope_if_needed(self, positions, q, k)
 
-        sk, sv = _get_scales(self)  # (num_kv_heads, head_dim) — already at model_dtype
+        sk, sv = _get_scales(self)  # (num_kv_heads, head_dim) on K's device
         sk_flat = sk.reshape(-1)
         sv_flat = sv.reshape(-1)
 
