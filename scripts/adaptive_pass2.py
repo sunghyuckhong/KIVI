@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Pass 2: regenerate truncated pass1 samples at MG=32k, merge, and re-score.
+"""Pass 2: regenerate truncated pass1 samples at higher MG, merge, and re-score.
+
+Model-agnostic — works for any model that vllm_custom.patches supports
+(Llama-3, Mistral, Qwen3, Qwen3-MoE, Qwen2, Exaone4).
 
 Reads a pass1 _samples.json, finds items whose response hit the cap (raw_resps
 token count >= MG-8), regenerates those at higher MG via vLLM, and re-scores
@@ -12,11 +15,11 @@ Scorers:
   - gpqa_main_cot_n_shot_32k   → flexible-extract: regex "\\b\\(([A-D])\\)"
 
 Usage:
-    python adaptive_pass2_qwen3.py \\
-        --samples logs/<task>_qwen3-8b_<mtag>_chat_vllm_samples.json \\
-        --task <task> --model_path Qwen/Qwen3-8B \\
+    python adaptive_pass2.py \\
+        --samples logs/<task>_<model>_<mtag>_chat_vllm_samples.json \\
+        --task <task> --model_path <hf-id> \\
         --pass1_mg 4096 --pass2_mg 32768 \\
-        --max_model_len 35584 --max_num_seqs 8 --tp 1 \\
+        --max_model_len <ctx> --max_num_seqs 8 --tp 1 \\
         --model bf16        # | fp8 | pertoken | smoothkv_fused
         [--group_size 128] [--bits 4] [--calib_path PATH]
 
@@ -36,9 +39,8 @@ from pathlib import Path
 warnings.filterwarnings("ignore")
 
 import vllm  # noqa: F401
-import vllm.model_executor.models.qwen3  # noqa: F401
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from vllm_custom import patches
+from vllm_custom import patches  # imports + patches all supported attention classes
 
 
 def parse_args():
@@ -78,22 +80,22 @@ def _clear_stale_plugin_cfg():
             print(f"  [plugin-guard] removed stale {p}")
 
 
-def _clear_stale_compile_cache():
-    """Wipe vLLM's torch.compile cache so the patched Qwen3Attention.forward
-    is captured fresh — vLLM's content-addressed cache hash has been seen
-    to collide across variants, silently loading another variant's compiled
-    graph and bypassing the runtime monkey-patch."""
-    import shutil
-    cache_dir = os.path.expanduser("~/.cache/vllm/torch_compile_cache")
-    if os.path.isdir(cache_dir):
-        shutil.rmtree(cache_dir, ignore_errors=True)
-        print(f"  [compile-cache-guard] wiped {cache_dir} to force fresh compile")
+def _isolate_compile_cache():
+    """Per-PID VLLM_CACHE_ROOT to avoid cross-variant graph-hash collisions
+    AND triton-cubin races between concurrent launches. See
+    run_eval_vllm.py:_isolate_compile_cache() for full rationale."""
+    pid = os.getpid()
+    per_proc_cache = f"/tmp/vllm_cache_{pid}"
+    os.makedirs(per_proc_cache, exist_ok=True)
+    os.environ["VLLM_CACHE_ROOT"] = per_proc_cache
+    os.environ["VLLM_CONFIG_ROOT"] = per_proc_cache
+    print(f"  [compile-cache-guard] using per-process cache {per_proc_cache}")
 
 
 def install_method(args):
     # ALWAYS clear stale plugin cfg + compile cache first.
     _clear_stale_plugin_cfg()
-    _clear_stale_compile_cache()
+    _isolate_compile_cache()
 
     if args.model in ("bf16", "fp16"):
         return
@@ -307,6 +309,18 @@ def main():
                "pass2_mg": args.pass2_mg}, open(out_results, "w"), indent=2)
     print(f"[pass2] wrote {out_samples}")
     print(f"[pass2] wrote {out_results}")
+
+
+    # Verify the FX graph that vLLM compiled actually contained our patched kernels.
+    try:
+        sys.path.insert(0, str(Path(__file__).parent))
+        from verify_compiled_graph import verify as _verify_graph
+        cache_root = os.environ.get("VLLM_CACHE_ROOT") or f"/tmp/vllm_cache_{os.getpid()}"
+        ok = _verify_graph(args.model, cache_root, verbose=True)
+        if not ok:
+            print("[WARN] GRAPH-VERIFY FAILED -- patches may have been silently bypassed!")
+    except Exception as e:
+        print(f"[verify-graph] could not run post-hoc check: {e}")
 
 
 if __name__ == "__main__":

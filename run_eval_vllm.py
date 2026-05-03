@@ -13,6 +13,7 @@ Caveats:
 import argparse
 import json
 import os
+import sys
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -83,26 +84,27 @@ def _clear_stale_plugin_cfg():
             print(f"  [plugin-guard] removed stale {p}")
 
 
-def _clear_stale_compile_cache():
-    """Wipe vLLM's torch.compile cache so the patched Qwen3Attention.forward
-    is captured fresh.
+def _isolate_compile_cache():
+    """Point vLLM's torch.compile cache at a per-process directory.
 
-    vLLM's `/root/.cache/vllm/torch_compile_cache/<hash>/...` directories are
-    keyed off the FX graph hash of the unpatched-then-patched forward. In
-    practice we've observed the same hash directory being reused across
-    variants (e.g. bf16/gpqa and smk/gpqa both got `1d151cc93d/`), which means
-    the second variant loaded the FIRST variant's compiled graph and the
-    runtime monkey-patch never made it into the captured kernels.
+    Avoids two failure modes of the shared default cache:
+      1. Stale-graph contamination: hash dirs collide across variants
+         (e.g. bf16/gpqa and smk/gpqa both got 1d151cc93d/), so the
+         second variant loads the FIRST variant's compiled FX graph
+         and the runtime monkey-patch never makes it into the kernels.
+      2. Race condition under concurrent launches: multiple vLLM
+         processes simultaneously writing/reading triton cubin files
+         produces 'Cubin file saved by TritonBundler not found'.
 
-    Wiping the cache before every run forces a fresh compile that captures
-    install_<variant>()'s replaced forward. Costs ~30-90 sec of compile
-    time but eliminates the silent-bypass risk.
+    Solution: VLLM_CACHE_ROOT=/tmp/vllm_cache_<pid> per process.
+    Each process has its own cache; ~60-90s recompile cost per launch.
     """
-    import shutil
-    cache_dir = os.path.expanduser("~/.cache/vllm/torch_compile_cache")
-    if os.path.isdir(cache_dir):
-        shutil.rmtree(cache_dir, ignore_errors=True)
-        print(f"  [compile-cache-guard] wiped {cache_dir} to force fresh compile")
+    pid = os.getpid()
+    per_proc_cache = f"/tmp/vllm_cache_{pid}"
+    os.makedirs(per_proc_cache, exist_ok=True)
+    os.environ["VLLM_CACHE_ROOT"] = per_proc_cache
+    os.environ["VLLM_CONFIG_ROOT"] = per_proc_cache
+    print(f"  [compile-cache-guard] using per-process cache {per_proc_cache}")
 
 
 def install_method(args):
@@ -115,7 +117,7 @@ def install_method(args):
     # compiled graph (e.g. bf16's) can be loaded for the current variant if
     # vLLM's content-addressed cache hash collides — and the runtime monkey-
     # patch never makes it into the captured kernels.
-    _clear_stale_compile_cache()
+    _isolate_compile_cache()
 
     if args.model in ("bf16", "fp16"):
         return  # no patch — unquantized baseline
@@ -276,6 +278,18 @@ def main():
         with open(samples_path, "w") as f:
             json.dump(results["samples"], f, indent=2, default=str)
         print(f"Saved samples: {samples_path}")
+
+
+    # Verify the FX graph that vLLM compiled actually contained our patched kernels.
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts"))
+        from verify_compiled_graph import verify as _verify_graph
+        cache_root = os.environ.get("VLLM_CACHE_ROOT") or f"/tmp/vllm_cache_{os.getpid()}"
+        ok = _verify_graph(args.model, cache_root, verbose=True)
+        if not ok:
+            print("[WARN] GRAPH-VERIFY FAILED -- patches may have been silently bypassed!")
+    except Exception as e:
+        print(f"[verify-graph] could not run post-hoc check: {e}")
 
 
 if __name__ == "__main__":

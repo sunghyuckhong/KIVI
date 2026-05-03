@@ -29,6 +29,10 @@ REPO=/home/home-mcl/sunghyuck/kv_cache_compression/KIVI
 cd "$REPO"
 export HF_TOKEN=$(cat ~/.cache/huggingface/token)
 
+# Stale /tmp/kivi_active_<GPU>.json files silently override --model arg via the
+# kivi_kv_quant plugin in vllm_qwen3_env. Always clear before launching.
+rm -f /tmp/kivi_active_*.json
+
 PY=/opt/vllm_qwen3_env/bin/python
 MODEL=mistralai/Mistral-7B-Instruct-v0.2
 CALIB=logs/calib/smoothkv_mistral-7b-instruct-v0.2_bf16_perc_ns512_puremax_a1b1_halfpair_slim.pt
