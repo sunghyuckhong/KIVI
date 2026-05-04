@@ -45,8 +45,8 @@ done
 }
 
 case "$TASK" in
-  gsm8k_cot|minerva_math500) MML=34304 ;;
-  gpqa_main_cot_n_shot_32k)  MML=35584 ;;
+  gsm8k_cot|minerva_math500) PROMPT_BUDGET=1536 ;;
+  gpqa_main_cot_n_shot_32k)  PROMPT_BUDGET=3072 ;;
   *) /usr/bin/echo "task must be gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot_32k"; exit 1 ;;
 esac
 
@@ -54,6 +54,14 @@ MODEL_PATH=LGAI-EXAONE/EXAONE-4.5-33B
 MODEL_TAG=exaone-4.5-33b
 cd /workspace/KIVI
 PY=/opt/vllm_exaone_v2_env/bin/python3
+
+# ---- derive max-gen-tokens from model's native context length ----
+# Rule: mg = 32k if model_max_len >= 32k else model_max_len/2.
+MODEL_MAX_LEN=$($PY -c "from transformers import AutoConfig; \
+print(AutoConfig.from_pretrained('$MODEL_PATH', trust_remote_code=True).max_position_embeddings)")
+if [ "$MODEL_MAX_LEN" -ge 32768 ]; then MG=32768; else MG=$((MODEL_MAX_LEN / 2)); fi
+MML=$((MG + PROMPT_BUDGET))
+/usr/bin/echo "[mg] model_max_len=$MODEL_MAX_LEN  →  mg=$MG, mml=$MML"
 
 # ---- env sanity (image_processor stub + config alias patch) ----
 SITE_PKG=$($PY -c "import transformers; print(transformers.__path__[0])")
@@ -110,11 +118,11 @@ RESULT=logs/${TASK}_${MODEL_TAG}_${VARIANT_TAG}_chat_vllm_results.json
 if [ -f "$RESULT" ]; then
   /usr/bin/echo "[run] SKIP — results.json exists"
 else
-  /usr/bin/echo "[run] $TASK  on $MODEL_PATH  (TP=2, MG=32k, max_num_seqs=8)"
+  /usr/bin/echo "[run] $TASK  on $MODEL_PATH  (TP=2, MG=$MG, max_num_seqs=8)"
   CUDA_VISIBLE_DEVICES=$GPUS $PY run_eval_vllm.py \
       $METHOD_ARGS --model_path "$MODEL_PATH" \
       --task "$TASK" --apply_chat_template \
-      --max_gen_toks 32768 --max_model_len $MML \
+      --max_gen_toks $MG --max_model_len $MML \
       --max_num_seqs 8 --batch_size 8 --tp 2 \
       --log_samples 2>&1 | /usr/bin/tee "$LOG"
 fi

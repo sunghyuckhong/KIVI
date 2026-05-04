@@ -60,8 +60,8 @@ MODEL_PATH="Qwen/Qwen3-${SIZE^^}"
 MODEL_TAG="qwen3-${SIZE}"
 
 case "$TASK" in
-  gsm8k_cot|minerva_math500) MML4=5632; MML32=34304 ;;
-  gpqa_main_cot_n_shot_32k)  MML4=7168; MML32=35584 ;;
+  gsm8k_cot|minerva_math500) PROMPT_BUDGET=1536 ;;
+  gpqa_main_cot_n_shot_32k)  PROMPT_BUDGET=3072 ;;
   *) /usr/bin/echo "task must be gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot_32k"; exit 1 ;;
 esac
 
@@ -70,6 +70,17 @@ if [ "$SIZE" = "8b" ]; then TP=1; MNS_P1=64; MNS_P2=24; else TP=2; MNS_P1=24; MN
 
 cd /workspace/KIVI
 PY=/opt/vllm_exaone_v2_env/bin/python3
+
+# ---- derive max-gen-tokens from model's native context length ----
+# Rule: pass2_mg = 32k if model_max_len >= 32k else model_max_len/2.
+# pass1_mg = min(4096, pass2_mg). pass2 is skipped if pass1 == pass2.
+MODEL_MAX_LEN=$($PY -c "from transformers import AutoConfig; \
+print(AutoConfig.from_pretrained('$MODEL_PATH', trust_remote_code=True).max_position_embeddings)")
+if [ "$MODEL_MAX_LEN" -ge 32768 ]; then PASS2_MG=32768; else PASS2_MG=$((MODEL_MAX_LEN / 2)); fi
+if [ "$PASS2_MG" -lt 4096 ]; then PASS1_MG=$PASS2_MG; else PASS1_MG=4096; fi
+MML4=$((PASS1_MG + PROMPT_BUDGET))
+MML32=$((PASS2_MG + PROMPT_BUDGET))
+/usr/bin/echo "[mg] model_max_len=$MODEL_MAX_LEN  →  pass1_mg=$PASS1_MG (mml=$MML4), pass2_mg=$PASS2_MG (mml=$MML32)"
 
 # ---- variant config + calib (SmoothKV only) ----
 calib_path=""
@@ -125,12 +136,12 @@ P2_LOG=logs/run_out/${MODEL_TAG}_${VARIANT_TAG}_pass2_${TASK}.log
 if [ -f "$SAMPLES" ] && [ -f "$RESULTS" ]; then
   /usr/bin/echo "[pass1] SKIP — samples + results exist"
 else
-  /usr/bin/echo "[pass1] $TASK  on $MODEL_PATH  (TP=$TP, MG=4k, max_num_seqs=$MNS_P1)"
+  /usr/bin/echo "[pass1] $TASK  on $MODEL_PATH  (TP=$TP, MG=$PASS1_MG, max_num_seqs=$MNS_P1)"
   CUDA_VISIBLE_DEVICES=$GPUS $PY run_eval_vllm.py \
       $METHOD_ARGS \
       --model_path "$MODEL_PATH" \
       --task "$TASK" --apply_chat_template \
-      --max_gen_toks 4096 --max_model_len $MML4 \
+      --max_gen_toks $PASS1_MG --max_model_len $MML4 \
       --max_num_seqs $MNS_P1 --batch_size $MNS_P1 --tp $TP \
       --log_samples 2>&1 | /usr/bin/tee "$P1_LOG"
 fi
@@ -146,29 +157,34 @@ if /usr/bin/grep "\[verify-graph\]" "$P1_LOG" | /usr/bin/grep -qE "FAIL"; then
 fi
 /usr/bin/echo "[pass1] verify-graph: PASS"
 
-# ---- Pass 2 ----
-if [ -f "$ADAPTIVE" ]; then
+# ---- Pass 2 (skip if pass1_mg == pass2_mg — pass2 would be redundant) ----
+if [ "$PASS1_MG" -eq "$PASS2_MG" ]; then
+  /usr/bin/echo "[pass2] skipped (pass1_mg == pass2_mg == $PASS1_MG; model_max_len=$MODEL_MAX_LEN doesn't allow longer retry)"
+  /bin/cp "$RESULTS" "$ADAPTIVE"
+elif [ -f "$ADAPTIVE" ]; then
   /usr/bin/echo "[pass2] SKIP — adaptive_results.json exists"
 else
-  /usr/bin/echo "[pass2] $TASK  retry truncated subset @ MG=32k  (max_num_seqs=$MNS_P2)"
+  /usr/bin/echo "[pass2] $TASK  retry truncated subset @ MG=$PASS2_MG  (max_num_seqs=$MNS_P2)"
   CUDA_VISIBLE_DEVICES=$GPUS $PY scripts/adaptive_pass2.py \
       --samples "$SAMPLES" --task "$TASK" --model_path "$MODEL_PATH" \
       $METHOD_ARGS \
-      --pass1_mg 4096 --pass2_mg 32768 \
+      --pass1_mg $PASS1_MG --pass2_mg $PASS2_MG \
       --max_model_len $MML32 --max_num_seqs $MNS_P2 --tp $TP \
       2>&1 | /usr/bin/tee "$P2_LOG"
 fi
 
-# Verify pass2 stamp
-if ! /usr/bin/grep -q "\[verify-graph\]" "$P2_LOG" 2>/dev/null; then
-  /usr/bin/echo "ERROR: pass2 has NO verify-graph stamp. Aborting." >&2
-  exit 2
+# Verify pass2 stamp (only if pass2 actually ran)
+if [ "$PASS1_MG" -ne "$PASS2_MG" ]; then
+  if ! /usr/bin/grep -q "\[verify-graph\]" "$P2_LOG" 2>/dev/null; then
+    /usr/bin/echo "ERROR: pass2 has NO verify-graph stamp. Aborting." >&2
+    exit 2
+  fi
+  if /usr/bin/grep "\[verify-graph\]" "$P2_LOG" | /usr/bin/grep -qE "FAIL"; then
+    /usr/bin/echo "ERROR: pass2 verify-graph FAILED. Aborting." >&2
+    exit 2
+  fi
+  /usr/bin/echo "[pass2] verify-graph: PASS"
 fi
-if /usr/bin/grep "\[verify-graph\]" "$P2_LOG" | /usr/bin/grep -qE "FAIL"; then
-  /usr/bin/echo "ERROR: pass2 verify-graph FAILED. Aborting." >&2
-  exit 2
-fi
-/usr/bin/echo "[pass2] verify-graph: PASS"
 
 /usr/bin/echo ""
 /usr/bin/echo "=================================================================="
