@@ -64,14 +64,22 @@ smoothkv-exp-clean/
 
 The actual KV fake-quantization logic lives in the
 [`sunghyuckhong/vllm-compression-part`](https://github.com/sunghyuckhong/vllm-compression-part)
-fork (branch `kv_cache_quant`, pinned in `Makefile`). `make setup` builds it
-from source (~15-30 min on first run).
+fork (branch `kv_cache_quant`, pinned in `Makefile`). `make setup` clones it
+into `VLLM_FORK_PATH` if missing and builds it from source (~15-30 min on
+first run).
 
 ```bash
 git clone <fork>/KIVI.git -b smoothkv-exp-clean
 cd KIVI
-make setup        # creates .venv, builds vllm fork at pinned commit, installs deps
+make setup        # auto-clones vllm fork, creates .venv, builds at pinned commit, installs deps
 make test         # unit tests (verify-graph + dtype/MSE bounds)
+```
+
+Override the fork URL or path if you have your own copy:
+
+```bash
+make setup VLLM_FORK_URL=git@github.com:my-org/vllm-compression-part.git \
+          VLLM_FORK_PATH=$HOME/src/vllm-compression-part
 ```
 
 To bump the vllm fork later, edit `VLLM_FORK_COMMIT` in the `Makefile` and run:
@@ -142,6 +150,8 @@ All `make run-*` targets read these variables. Override on the command line.
 | `BETA` | `1.0` | SmoothQuant β (V-side power). |
 | `LLAMA_MODEL` | `meta-llama/Meta-Llama-3-8B-Instruct` | HF id for `make run-llama`. |
 | `MISTRAL_MODEL` | `mistralai/Mistral-7B-Instruct-v0.2` | HF id for `make run-mistral`. |
+| `VLLM_FORK_URL` | `https://github.com/sunghyuckhong/vllm-compression-part.git` | Fork remote — `make setup` clones from here if `VLLM_FORK_PATH` is missing. |
+| `VLLM_FORK_PATH` | `/workspace/sunghyuck/vllm-compression-part` | Where the fork lives on disk. |
 | `VLLM_FORK_COMMIT` | (pinned in Makefile) | vllm-compression-part `kv_cache_quant` commit to install. |
 
 Example overrides:

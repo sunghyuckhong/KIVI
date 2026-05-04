@@ -28,6 +28,8 @@ SHELL := /bin/bash
 
 # --- vllm-compression-part fork (KV fake-quant lives here) -------------------
 # Pinned commit on kv_cache_quant; bump after re-verifying graph capture.
+# `make setup` will clone the fork into VLLM_FORK_PATH if missing.
+VLLM_FORK_URL     ?= https://github.com/sunghyuckhong/vllm-compression-part.git
 VLLM_FORK_PATH    ?= /workspace/sunghyuck/vllm-compression-part
 VLLM_FORK_BRANCH  ?= kv_cache_quant
 VLLM_FORK_COMMIT  ?= 675ba44c0a
@@ -62,6 +64,12 @@ RESET  := $(shell printf '\033[0m')
 
 # --- Environment setup -------------------------------------------------------
 setup: $(VENV)/bin/activate ## One-time: build vllm fork + venv + install KIVI deps
+	@if [ ! -d $(VLLM_FORK_PATH) ]; then \
+	  echo "$(GREEN)>>> Clone vllm fork → $(VLLM_FORK_PATH) (from $(VLLM_FORK_URL), branch $(VLLM_FORK_BRANCH))$(RESET)"; \
+	  git clone --branch $(VLLM_FORK_BRANCH) $(VLLM_FORK_URL) $(VLLM_FORK_PATH); \
+	else \
+	  echo "$(YELLOW)[setup] vllm fork already at $(VLLM_FORK_PATH); skipping clone$(RESET)"; \
+	fi
 	@echo "$(GREEN)>>> Checkout vllm fork at pinned commit $(VLLM_FORK_COMMIT)$(RESET)"
 	cd $(VLLM_FORK_PATH) && git fetch --all && git checkout $(VLLM_FORK_COMMIT)
 	@echo "$(GREEN)>>> Install vllm-compression-part (editable; vllm._C compile ~15-30min)$(RESET)"
@@ -76,6 +84,7 @@ setup: $(VENV)/bin/activate ## One-time: build vllm fork + venv + install KIVI d
 
 setup-fork: ## Re-checkout the pinned commit + reinstall the fork only (faster)
 	@[ -d $(VENV) ] || (echo "ERROR: run 'make setup' first" && exit 1)
+	@[ -d $(VLLM_FORK_PATH) ] || (echo "ERROR: $(VLLM_FORK_PATH) missing; run 'make setup' first" && exit 1)
 	cd $(VLLM_FORK_PATH) && git fetch --all && git checkout $(VLLM_FORK_COMMIT)
 	$(PIP) install -e $(VLLM_FORK_PATH)
 
