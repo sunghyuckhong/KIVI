@@ -1,137 +1,334 @@
-# KIVI: A Tuning-Free Asymmetric 2bit Quantization for KV Cache
+# SmoothKV Evaluation
 
-Implementation of [ICML24] [KIVI: A Tuning-Free Asymmetric 2bit Quantization for KV Cache](https://arxiv.org/abs/2402.02750)
+A harness for accuracy evaluation of KV-cache fake-quantization methods on
+reasoning benchmarks. Each (model × method × task) cell runs through a
+two-pass adaptive eval with a graph-verification trust gate at each pass.
 
-## Updates
-- [2025.09.25]: 🔥🔥🔥 We released a toolkit that tests the impact of numerical precision and enables deterministic LLM inference. This helps eliminate the training–inference mismatch in reinforcement learning. Please 🌟 it if you find this work is interesting and useful for your research! <https://github.com/nanomaoli/llm_reproducibility>
-- [2025.01.18]: We add KIVI implementation with GQA and compatible with transformers 4.43. Now it supports the LLama3 family. Please reinstall KIVI.
-- [2024.06.07]: 🎉 KIVI largely inspires the [HuggingFace Transformers KV Cache quantization](https://huggingface.co/docs/transformers/main/en/kv_cache)
-- [2024.06.06]: (Beta) We extensively optimize the codebase in [branch develop](https://github.com/jy-yuan/KIVI/tree/develop) to reduce the latency of KIVI. Note that **you need to reinstall our CUDA implementation** under the ```quant``` folder.
-- [2024.05.01]: 🎉 KIVI has been accepted by ICML 2024! See you in Vienna!
-- [2024.04.12]: We add support for the Mistral model family. The performance of LongChat-7b-v1.5-32K and Mistral-7B-Instruct-v0.2 on 15 tasks from LongBench can be found in [long_bench.md](./docs/long_bench.md).
+## Methods
 
-- [2024.04.05]: We release the code for reproducing our CoQA/TruthfulQA/GSM8K results using LM-Eval. Please check the [README of branch lmeval](https://github.com/jy-yuan/KIVI/tree/lmeval).
+| Method | Description | Calibration | Per-step cost |
+|--------|-------------|:-----------:|---------------|
+| `bf16` / `fp16` | Unquantized baseline | none | none |
+| `fp8` | FP8 E4M3, group=128, per-token | none | 1× round-trip |
+| `pertoken` | INT4, group=128, per-token | none | 1× round-trip |
+| `smoothkv` | Per-step SmoothQuant rescale + INT4 round-trip | `s_K`, `s_V` `.pt` | `÷ s_K` + INT4 + `× s_K` |
+| `smoothkv_fused` | Load-time fold of `s_K` / `s_V` into projection weights, then plain pertoken at inference | `s_K`, `s_V` `.pt` (HUK for q-norm models) | same as `pertoken` |
 
-- [2024.04.04]: 🔥🔥We add a new 5-digit [passkey example](./long_context_example.py) with 12k context length to show the performance of 2bit KIVI under the long context senario.
+## Tasks
 
-- [2024.04.04]: (Beta) We add the flash-attention support for KIVI during the prefill phase. 
+| Task | Domain | Set size | Canonical metric |
+|------|--------|:--------:|------------------|
+| **gsm8k_cot** | Grade-school math | 2638 | `exact_match,flexible-extract` (lm-eval flex regex) |
+| **minerva_math500** | Competition math | 500 | `math_verify,none` (sympy boxed-aware) |
+| **gpqa_main_cot_n_shot_32k** | Graduate Q&A | 1170 | `exact_match,flexible-extract` |
 
-- [2024.04.03]: We add a new [5-shot GSM8K example.py](./example.py) to show the performance of 2/4 bit KIVI with 32 full precision tokens.
+## Models
 
-- [2024.02.05]: KIVI ver. 2 is released on [arXiv](https://arxiv.org/abs/2402.02750).
+| Family | Sizes tested | Tensor parallel |
+|--------|--------------|:---------------:|
+| Qwen3 | 8B, 32B | 1 / 2 |
+| Llama-3 | 8B-Instruct (default), any HF id | 1 (8B) / 2-4 (70B) |
+| Mistral | 7B-Instruct-v0.2 | 1 |
+| EXAONE-4.5 | 33B | 2 |
 
-- [2024.02.03]: KIVI code is released.
+## Structure
 
-- [2023.12.29]: KIVI ver. 1 is released on [researchgate](https://www.researchgate.net/publication/376831635_KIVI_Plug-and-play_2bit_KV_Cache_Quantization_with_Streaming_Asymmetric_Quantization).
+```
+smoothkv-exp-clean/
+├── Makefile                       # setup / test / per-family sweeps
+├── README.md                      # this file
+├── pytest.ini
+├── requirements_smoothkv.txt
+├── run_eval_vllm.py               # single-pass eval driver (lm-eval + vLLM)
+├── run_smoothkv_calibrate.py      # SmoothKV calibration (s_K, s_V) generator
+├── quant/
+│   ├── __init__.py
+│   └── smoothkv_quant.py          # calibration math (SmoothQuant formulas)
+├── scripts/
+│   ├── adaptive_pass2.py          # pass-2 driver (MG=32k retry + merge + rescore)
+│   ├── parallel_sweep.py          # auto-parallel cell scheduler over idle GPUs
+│   ├── verify_compiled_graph.py   # graph-verification trust gate
+│   ├── run_eval_qwen3.sh          # per-family runner: Qwen3 8B / 32B
+│   ├── run_eval_llama.sh          # per-family runner: Llama-3
+│   ├── run_eval_mistral.sh        # per-family runner: Mistral (shim over llama)
+│   └── run_eval_exaone.sh         # per-family runner: EXAONE-4.5
+└── tests/
+    ├── conftest.py
+    ├── test_quant_dtype.py        # dtype + MSE bounds on quant kernels
+    └── test_verify_graph.py       # FX-graph capture asserts
+```
 
-## Overview
+## Quick Start
 
-KIVI is a new plug-and-play 2bit KV cache quantization algorithm without any fine-tuning. This algorithm optimizes memory usage by quantizing the key cache per-channel and the value cache per-token to 2bit. KIVI's hardware-friendly design allows LLMs like Llama-2, Falcon, and Mistral to maintain comparable quality levels while reducing peak memory usage by 2.6 times. This enables up to 4 times larger batch sizes and significantly increases throughput by 2.35 to 3.47 times in real LLM inference workloads, effectively addressing the bottleneck issues in speed and memory usage.
+### 1. Setup
 
-Illustration of KIVI quantization scheme: key cache per-channel and value cache per-token.
-<p align="center">
-<img width="300" src="./img/quant_scheme.png">
-</p>
-
-Illustration of KIVI algorithm during inference prefill and decoding phase:
-<p align="center">
-<img width="700" src="./img/algo.png">
-</p>
-
-## How to use KIVI
-
-### Setup
-
-To install the required packages:
+The actual KV fake-quantization logic lives in the
+[`sunghyuckhong/vllm-compression-part`](https://github.com/sunghyuckhong/vllm-compression-part)
+fork (branch `kv_cache_quant`, pinned in `Makefile`). `make setup` builds it
+from source (~15-30 min on first run).
 
 ```bash
-conda create -n kivi python=3.10
-conda activate kivi
-pip install --upgrade pip  # enable PEP 660 support
-pip install -e .
+git clone <fork>/KIVI.git -b smoothkv-exp-clean
+cd KIVI
+make setup        # creates .venv, builds vllm fork at pinned commit, installs deps
+make test         # unit tests (verify-graph + dtype/MSE bounds)
 ```
 
-Then install our CUDA implementation:
+To bump the vllm fork later, edit `VLLM_FORK_COMMIT` in the `Makefile` and run:
 
 ```bash
-cd quant && pip install -e .
+make setup-fork   # re-checkout fork at pinned commit + reinstall (skips venv/deps)
 ```
 
-### Example
+### 2. Generate calibration (SmoothKV variants only)
 
-Load model with KIVI: (e.g., Llama-2-7b)
-
-```python
-# LLaMA model with KIVI
-import torch
-import os
-from models.llama_kivi import LlamaForCausalLM_KIVI
-from transformers import LlamaConfig, AutoTokenizer
-config = LlamaConfig.from_pretrained("meta-llama/Llama-2-7b-hf")
-
-config.k_bits = K_BITS # current support 2/4 bit for KV Cache
-config.v_bits = V_BITS # current support 2/4 bit for KV Cache
-config.group_size = GROUP_SIZE
-config.residual_length = RESIDUAL_LENGTH # the number of recent fp16 tokens
-CACHE_DIR = PATH_TO_YOUR_SAVE_DIR
-
-model = LlamaForCausalLM_KIVI.from_pretrained(
-    pretrained_model_name_or_path='meta-llama/Llama-2-7b-hf',
-    config=config,
-    cache_dir=CACHE_DIR,
-    torch_dtype=torch.float16,
-    low_cpu_mem_usage=True,
-    device_map="auto",
-)
-
-tokenizer = AutoTokenizer.from_pretrained(
-    'meta-llama/Llama-2-7b-hf', 
-    use_fast=False, 
-    trust_remote_code=True, 
-    tokenizer_type='llama')
-
-# Inference
-# e.g., model.generate(...)
-```
-
-#### GSM8K example
-We use GSM8K as an example to show how to use KIVI. You can check [example.py](./example.py):
+`bf16`, `fp16`, `fp8`, `pertoken` need no calibration. For `smoothkv` and
+`smoothkv_fused`, generate `(s_K, s_V)` once per (model, α, β):
 
 ```bash
-python example.py
+python run_smoothkv_calibrate.py \
+    --model Qwen/Qwen3-8B \
+    --num_samples 512 --seq_length 2048 \
+    --alpha 1.0 --beta 1.0 \
+    --apply_chat_template \
+    --output logs/calib/smoothkv_qwen3-8b_a1b1_chat.pt
 ```
 
-#### Passkey retrieval example
+For `smoothkv_fused` on models with `q_norm`/`k_norm` (Qwen3, Qwen3-MoE,
+EXAONE-4), pass `--head_uniform_k` to produce the `_huk_*` variant — the
+fold path requires head-uniform `s_K` because RMSNorm doesn't commute with
+per-channel scaling. The per-family runners take care of this automatically.
 
-Passkey retrieval with KIVI. You can check [long_context_example.py](./long_context_example.py):
+### 3. Run an eval
+
+The simplest entry point — sweeps a single (model, family) over all
+4 methods × 3 tasks, runs cells in parallel across idle GPUs:
 
 ```bash
-python long_context_example.py
+make run-qwen3-8b               # 1 GPU per cell, all idle GPUs used
+make run-qwen3-32b              # 2 GPUs per cell (TP=2)
+make run-llama                  # default LLAMA_MODEL=Meta-Llama-3-8B-Instruct
+make run-mistral
+make run-exaone                 # TP=2
+
+make run-all                    # qwen3-8b + llama + mistral
 ```
 
-#### Evaluate KIVI on LongBench
+Behind the scenes, each invocation goes through `scripts/parallel_sweep.py`
+which detects idle GPUs (memory.used < 2GB), chunks them into TP-sized
+streams, and greedily schedules `(variant, task)` cells across the streams.
+Per-cell, the runner does pass1 at MG=4k → verify-graph → pass2 at MG=32k
+→ verify-graph → write `_adaptive_results.json`.
 
-We currently support Llama and Mistral family of models. We recently test KIVI on Mistral-7B-Instruct-v0.2 and Longchat-7b-v1.5-32k. Please check [long_bench.md](./docs/long_bench.md) for more details.
+To run a single cell manually:
+
 ```bash
-bash scripts/long_test.sh {GPU_ID} {K_BITS} {V_BITS} {GROUP_LENGTH} {RESIDUAL_LENGTH} {MODEL_NAME}
-python eval_long_bench.py --model {MODEL} # MODEL is the dir name under pred/ Currently it support Llama family model and Mistral model.
+bash scripts/run_eval_qwen3.sh \
+    --size 8b --variant smkv --task gsm8k_cot \
+    --gpus 0 --alpha 1.0 --beta 1.0
 ```
 
-## Citation
+## Configuration
 
-If you find our method useful, please kindly cite our paper.
+All `make run-*` targets read these variables. Override on the command line.
 
-```bibtex
-@article{liu2024kivi,
-  title={KIVI: A Tuning-Free Asymmetric 2bit Quantization for KV Cache},
-  author={Liu, Zirui and Yuan, Jiayi and Jin, Hongye and Zhong, Shaochen and Xu, Zhaozhuo and Braverman, Vladimir and Chen, Beidi and Hu, Xia},
-  journal={arXiv preprint arXiv:2402.02750},
-  year={2024}
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GPUS` | `auto` | `auto` = scan idle (memory < 2GB), chunk by `--tp`. Or comma-separated explicit pool: `0,1,2,3`. `0,1` for TP=2 = single sequential stream. |
+| `VARIANTS` | `bf16 fp8 pertoken smkv` | Methods to sweep. |
+| `TASKS` | `gsm8k_cot minerva_math500 gpqa_main_cot_n_shot_32k` | Tasks to sweep. |
+| `NS` | `512` | SmoothKV calibration sample count. |
+| `ALPHA` | `1.0` | SmoothQuant α (K-side migration strength). |
+| `BETA` | `1.0` | SmoothQuant β (V-side power). |
+| `LLAMA_MODEL` | `meta-llama/Meta-Llama-3-8B-Instruct` | HF id for `make run-llama`. |
+| `MISTRAL_MODEL` | `mistralai/Mistral-7B-Instruct-v0.2` | HF id for `make run-mistral`. |
+| `VLLM_FORK_COMMIT` | (pinned in Makefile) | vllm-compression-part `kv_cache_quant` commit to install. |
+
+Example overrides:
+
+```bash
+make run-qwen3-8b VARIANTS="bf16 smkv"            # 2 methods only
+make run-llama TASKS=gsm8k_cot                     # 1 task only
+make run-qwen3-32b GPUS=0,1,2,3                    # explicit 2-stream pool
+make run-qwen3-8b ALPHA=0.5 BETA=0.5               # different SmoothKV α/β
+make run-llama LLAMA_MODEL=meta-llama/Meta-Llama-3.1-8B-Instruct
+```
+
+### Auto-parallel scheduling
+
+When `GPUS=auto` (default), `parallel_sweep.py` picks idle GPUs via
+`nvidia-smi` and runs as many concurrent cells as fit. On an 8-GPU host:
+
+| Target | TP | Streams | Concurrent cells |
+|--------|:--:|:-------:|:----------------:|
+| `make run-qwen3-8b` | 1 | 8 | 8 |
+| `make run-qwen3-32b` | 2 | 4 | 4 |
+| `make run-llama` | 1 | 8 | 8 |
+| `make run-exaone` | 2 | 4 | 4 |
+
+Output during a run:
+
+```
+[parallel] auto-detected idle GPUs (< 2000MB): [0, 1, 2, 3, 4, 5, 6, 7]
+[parallel] 4 stream(s) × 2 GPU(s): [0,1], [2,3], [4,5], [6,7]
+[parallel] 12 cells: variants=['bf16', 'fp8', 'pertoken', 'smkv'] × tasks=['gsm8k_cot', 'minerva_math500', 'gpqa_main_cot_n_shot_32k']
+[parallel] START  bf16       gsm8k_cot                          gpu=[0,1]  → logs/run_out/parallel_bf16_gsm8k_cot_g0_1.log
+...
+[parallel] DONE   bf16       gsm8k_cot                          gpu=[0,1]  ✅ PASS  1842s  (1/12 cells; elapsed 1842s)
+...
+[parallel] ✅ all 12 cells passed in 11052s (4-way parallel)
+```
+
+## Results
+
+Each cell writes three artifacts under `logs/`:
+
+| File | Purpose |
+|------|---------|
+| `<task>_<model>_<variant>_chat_vllm_results.json` | Pass-1 score (preliminary; doesn't account for truncation) |
+| `<task>_<model>_<variant>_chat_vllm_samples.json` | Per-item generations from pass 1 |
+| `<task>_<model>_<variant>_chat_vllm_adaptive_results.json` | **Final headline number** (pass-1 + pass-2 retried truncated items, merged + rescored) |
+
+Plus per-pass logs in `logs/run_out/*_pass{1,2}_<task>.log`.
+
+Read the headline number:
+
+```bash
+python -c "
+import json
+d = json.load(open('logs/gsm8k_cot_qwen3-8b_smoothkv_fused_g128_..._chat_vllm_adaptive_results.json'))
+print(d['results']['gsm8k_cot']['exact_match,flexible-extract'])
+"
+```
+
+Example file:
+
+```json
+{
+  "results": {
+    "gsm8k_cot": {
+      "exact_match,strict-match":      0.595,
+      "exact_match,flexible-extract":  0.909,
+      "exact_match_n,strict-match":    2638,
+      "exact_match_n,flexible-extract": 2638
+    }
+  },
+  "n_truncated_pass1": 178,
+  "n_total":           2638,
+  "pass1_mg":          4096,
+  "pass2_mg":          32768
 }
 ```
 
-## Contributing
-We welcome contributions from the research community to improve KIVI. If you have any idea or would like to report a bug, please open an issue or submit a pull request.
+## Trust gate
 
-## License
-The code is released under the MIT License.
+Every `_adaptive_results.json` requires a `[verify-graph] ✅ PASS` stamp on
+**both** pass-1 and pass-2 logs. This is checked at three levels:
+
+1. **Unit-level** (`tests/test_verify_graph.py`, run via `make test`) — runs each
+   method through `torch._dynamo.export` and asserts the captured FX graph
+   contains the expected `vllm_kv_quant::*` op signatures.
+2. **Eval-level** (`scripts/verify_compiled_graph.py`, called automatically at
+   the end of every `run_eval_vllm.py` and `scripts/adaptive_pass2.py`) — greps
+   inductor's `computation_graph.py` dump for kernel names.
+3. **Pipeline-level** (each shell runner) — greps the log for the stamp;
+   aborts with `exit 2` if missing or `FAIL`.
+
+Per-method expected substrings:
+
+| Method | Expected in FX graph | Forbidden |
+|--------|---------------------|-----------|
+| `bf16` / `fp16` | (none) | `quant_and_pack`, `fake_quantize` |
+| `fp8` | `fake_quantize_dequantize_fp8` | — |
+| `pertoken` | `quant_and_pack_vcache`, `unpack_and_dequant_vcache` | — |
+| `smoothkv` | `quant_and_pack_vcache` | — |
+| `smoothkv_fused` | `quant_and_pack_vcache` | — |
+
+If verify-graph fails, the result is not trustable: the runtime almost
+certainly fell back to BF16 (e.g. via a stale compile-cache hash collision).
+
+## `max_gen_tokens` rule
+
+The runners derive `max_gen_tokens` from the model's native context length:
+
+```
+pass2_mg = 32768                      if model_max_len >= 32768
+         = model_max_len / 2          otherwise
+pass1_mg = min(4096, pass2_mg)
+pass2 skipped if pass1_mg == pass2_mg (pass1 stands as the result)
+```
+
+Concretely:
+
+| Model | `model_max_len` | `pass1_mg` | `pass2_mg` |
+|-------|:---------------:|:----------:|:----------:|
+| Llama-3-8B-Instruct | 8192 | 4096 | 4096 (pass2 skipped) |
+| Llama-3.1-8B-Instruct | 131072 | 4096 | 32768 |
+| Mistral-7B-Instruct-v0.2 | 32768 | 4096 | 32768 |
+| Qwen3-8B / Qwen3-32B | 40960 | 4096 | 32768 |
+| EXAONE-4.5-33B | 32768 | n/a | 32768 (single-pass) |
+
+Each runner prints the resolved values once at startup:
+
+```
+[mg] model_max_len=40960  →  pass1_mg=4096 (mml=5632), pass2_mg=32768 (mml=34304)
+```
+
+## Common commands
+
+```bash
+make help          # list available targets
+make print-pin     # print pinned vllm-compression-part commit
+make setup         # build vllm fork + venv + Python deps (~15-30 min)
+make setup-fork    # re-checkout the pinned fork commit + reinstall (faster)
+make test          # run unit tests
+make run-qwen3-8b  # full sweep on Qwen3-8B
+make run-all       # qwen3-8b + llama + mistral (skips 32b/exaone)
+make clean         # remove .venv (keeps logs/ and calib/)
+```
+
+## Architecture
+
+```
+                       ┌──────────────────────────────────────────┐
+                       │ vllm-compression-part @ kv_cache_quant     │
+                       │                                          │
+                       │  vllm/config/kv_cache_quant.py           │
+                       │      KVCacheQuantConfig                  │
+                       │                                          │
+                       │  vllm/.../quantization/kv_fake_quant/    │
+                       │      kernels.py     (FP8 + INT4 ops)     │
+                       │      layer_hooks.py (LayerKVQuantState   │
+                       │                      + apply_kv_quant)   │
+                       │      fusion.py      (smoothkv_fused      │
+                       │                      weight folding)     │
+                       │                                          │
+                       │  vllm/.../attention/attention.py         │
+                       │      __init__: attach_kv_quant_to_layer  │
+                       │      forward:  apply_kv_quant            │
+                       │                                          │
+                       │  vllm/v1/worker/gpu_worker.py            │
+                       │      load_model: maybe_run_post_load_fusion │
+                       └──────────────────────────────────────────┘
+                                          ▲
+                                          │   LLM(kv_cache_quant_config=...)
+                                          │
+                       ┌──────────────────────────────────────────┐
+                       │ this repo                                │
+                       │  run_eval_vllm.py        single-pass     │
+                       │  scripts/adaptive_pass2  pass-2 retry    │
+                       │  scripts/run_eval_*.sh   per-family      │
+                       │  scripts/parallel_sweep  auto-scheduler  │
+                       │  scripts/verify_*        trust gate      │
+                       │  run_smoothkv_calibrate  calib gen       │
+                       └──────────────────────────────────────────┘
+```
+
+The vllm fork wires KV fake-quant into the shared `Attention` class via three
+inline reads — one in `__init__` (registers per-instance state from
+`KVCacheQuantConfig`), one in `forward` (dispatches to the configured method's
+QDQ kernels), and one in `Worker.load_model` (folds smoothkv_fused scales
+into projection weights). No monkey-patches.
+
+This repo wraps that with eval drivers, calibration generation, and the
+verify-graph trust gate.
