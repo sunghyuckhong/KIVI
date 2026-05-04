@@ -162,6 +162,7 @@ All `make run-*` targets read these variables. Override on the command line.
 | `VLLM_FORK_PATH` | `/workspace/sunghyuck/vllm-compression-part` | Where the fork lives on disk. |
 | `VLLM_FORK_COMMIT` | (pinned in Makefile) | vllm-compression-part `kv_cache_quant` commit to install. |
 | `PY` | `.venv/bin/python` (set by Makefile) | Python interpreter used by the runners. The runners default to `./.venv/bin/python` if `PY` is unset; the Makefile exports `PY` so subprocesses inherit it. Override with `PY=/path/to/python make run-qwen3-8b ...` if you need a different env. |
+| `FORCE` | `0` | Set to `1` to bypass the runner's "skip if outputs exist" gate. Forces both pass-1 and pass-2 to re-run; calibration is unaffected. See "Re-running an existing cell" below. |
 
 Example overrides:
 
@@ -213,17 +214,23 @@ Plus per-pass logs in `logs/run_out/*_pass{1,2}_<task>.log`.
 
 ### Re-running an existing cell
 
-By default the runners **skip** any cell whose pass-1 `_results.json` already
-exists. To force a re-run (e.g. to pick up new verify-graph stamps after
-upgrading the fork, or because the previous output didn't carry a stamp),
-move the existing artifacts out of the way first:
+By default the runners **skip** any cell whose pass-1 `_results.json` and
+`_adaptive_results.json` already exist. To force a re-run (e.g. to pick up
+a new verify-graph stamp after upgrading the fork, or because the previous
+output didn't carry a stamp), pass `FORCE=1`:
 
 ```bash
-# Re-run e.g. Qwen3-8B BF16 on gsm8k_cot:
-mkdir -p logs/_unstamped
-mv logs/gsm8k_cot_qwen3-8b_bf16_chat_vllm_* logs/_unstamped/
-make run-qwen3-8b VARIANTS=bf16 TASKS=gsm8k_cot
+# Re-run only Qwen3-8B BF16 on gsm8k_cot, overwriting existing outputs:
+make run-qwen3-8b VARIANTS=bf16 TASKS=gsm8k_cot FORCE=1
 ```
+
+`FORCE=1` skips both the pass-1 and pass-2 skip checks, but does **not**
+regenerate calibration `.pt` files — those are deterministic w.r.t.
+(model, dataset, NS, α, β) so manual deletion is the right escape hatch
+if you need a fresh calib.
+
+Alternative: move the existing artifacts to `logs/_unstamped/` first if
+you want to keep them as a baseline for comparison.
 
 Read the headline number:
 

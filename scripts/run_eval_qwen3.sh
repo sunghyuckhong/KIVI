@@ -202,8 +202,11 @@ P2_LOG=logs/run_out/${MODEL_TAG}_${VARIANT_TAG}_pass2_${TASK}.log
 /bin/mkdir -p logs/run_out logs/calib
 
 # ---- Pass 1 ----
-if [ -f "$SAMPLES" ] && [ -f "$RESULTS" ]; then
-  /usr/bin/echo "[pass1] SKIP — samples + results exist"
+# Skip if outputs exist AND FORCE != 1. Set FORCE=1 to redo a cell (e.g. to
+# pick up a new verify-graph stamp after upgrading the fork).
+FORCE="${FORCE:-0}"
+if [ "$FORCE" != "1" ] && [ -f "$SAMPLES" ] && [ -f "$RESULTS" ]; then
+  /usr/bin/echo "[pass1] SKIP — samples + results exist (set FORCE=1 to override)"
 else
   /usr/bin/echo "[pass1] $TASK  on $MODEL_PATH  (TP=$TP, MG=$PASS1_MG, max_num_seqs=$MNS_P1)"
   CUDA_VISIBLE_DEVICES=$GPUS $PY run_eval_vllm.py \
@@ -230,8 +233,8 @@ fi
 if [ "$PASS1_MG" -eq "$PASS2_MG" ]; then
   /usr/bin/echo "[pass2] skipped (pass1_mg == pass2_mg == $PASS1_MG; model_max_len=$MODEL_MAX_LEN doesn't allow longer retry)"
   /bin/cp "$RESULTS" "$ADAPTIVE"
-elif [ -f "$ADAPTIVE" ]; then
-  /usr/bin/echo "[pass2] SKIP — adaptive_results.json exists"
+elif [ "$FORCE" != "1" ] && [ -f "$ADAPTIVE" ]; then
+  /usr/bin/echo "[pass2] SKIP — adaptive_results.json exists (set FORCE=1 to override)"
 else
   /usr/bin/echo "[pass2] $TASK  retry truncated subset @ MG=$PASS2_MG  (max_num_seqs=$MNS_P2)"
   CUDA_VISIBLE_DEVICES=$GPUS $PY scripts/adaptive_pass2.py \
