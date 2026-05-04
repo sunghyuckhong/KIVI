@@ -8,6 +8,9 @@
 #   lm-eval     — the eval harness invoked by run_eval_vllm.py
 #   math-verify — sympy-based boxed-aware verifier used by minerva_math500
 #                 in scripts/scoring.py (and in adaptive_pass2 dispatch)
+#   ray         — required by lm_eval.models.vllm_causallms.VLLM (it imports
+#                 ray at module top-level even when TP=1 / no Ray runtime)
 
 lm-eval>=0.4.0
 math-verify>=0.5.0
+ray>=2.50.0
