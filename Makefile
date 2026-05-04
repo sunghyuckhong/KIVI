@@ -45,7 +45,7 @@ BETA           ?= 1.0
 
 LLAMA_MODEL    ?= meta-llama/Meta-Llama-3-8B-Instruct
 MISTRAL_MODEL  ?= mistralai/Mistral-7B-Instruct-v0.2
-GPUS           ?= 0     # override to "0,1" for TP=2 (run-qwen3-32b, run-exaone)
+GPUS           ?= auto  # auto = scan idle (< 2GB used), chunk by --tp; or "0,1,2,3"
 
 # --- Colors ------------------------------------------------------------------
 # Store the actual ESC byte (not the literal "\033" string) so awk/echo/printf
@@ -115,50 +115,37 @@ status: ## Print resolved sweep parameters
 	@echo ""
 
 # --- Per-family sweeps: VARIANTS × TASKS via scripts/run_eval_<family>.sh ---
+#
+# Each target runs through scripts/parallel_sweep.py, which detects idle GPUs
+# (or uses an explicit pool) and runs cells in parallel — one cell per
+# TP-sized GPU stream, scheduled greedily as streams free up.
+#
+#   GPUS=auto (default): scan nvidia-smi for GPUs with memory.used < 2GB,
+#                        chunk by --tp, run as many concurrent streams as fit
+#   GPUS="0,1,2,3":      explicit pool (still chunked by --tp; e.g. for TP=2
+#                        this means 2 streams [0,1] and [2,3])
+#   GPUS="0,1":          single stream (sequential cells)
+#
+# Sweep arg: --gpus is only forwarded when GPUS != "auto" (otherwise
+# parallel_sweep.py auto-detects).
+SWEEP = $(PY) scripts/parallel_sweep.py \
+        --variants $(VARIANTS) --tasks $(TASKS) \
+        --ns $(NS) --alpha $(ALPHA) --beta $(BETA) \
+        $(if $(filter-out auto,$(GPUS)),--gpus $(GPUS))
 
-run-qwen3-8b: ## Sweep Qwen3-8B (4 variants × 3 tasks) on $(GPUS)
-	@for v in $(VARIANTS); do \
-	  for t in $(TASKS); do \
-	    echo "$(GREEN)>>> Qwen3-8B / $$v / $$t$(RESET)"; \
-	    bash scripts/run_eval_qwen3.sh --size 8b --variant $$v --task $$t \
-	      --gpus $(GPUS) --ns $(NS) --alpha $(ALPHA) --beta $(BETA) || exit 1; \
-	  done; \
-	done
+run-qwen3-8b: ## Sweep Qwen3-8B (TP=1, auto-parallel)
+	@$(SWEEP) --tp 1 --runner scripts/run_eval_qwen3.sh --runner_args="--size 8b"
 
-run-qwen3-32b: ## Sweep Qwen3-32B (TP=2; pass GPUS="0,1")
-	@for v in $(VARIANTS); do \
-	  for t in $(TASKS); do \
-	    echo "$(GREEN)>>> Qwen3-32B / $$v / $$t$(RESET)"; \
-	    bash scripts/run_eval_qwen3.sh --size 32b --variant $$v --task $$t \
-	      --gpus $(GPUS) --ns $(NS) --alpha $(ALPHA) --beta $(BETA) || exit 1; \
-	  done; \
-	done
+run-qwen3-32b: ## Sweep Qwen3-32B (TP=2, auto-parallel; e.g. 8 idle GPUs → 4 streams)
+	@$(SWEEP) --tp 2 --runner scripts/run_eval_qwen3.sh --runner_args="--size 32b"
 
-run-llama: ## Sweep $(LLAMA_MODEL) on $(GPUS)
-	@for v in $(VARIANTS); do \
-	  for t in $(TASKS); do \
-	    echo "$(GREEN)>>> $(LLAMA_MODEL) / $$v / $$t$(RESET)"; \
-	    bash scripts/run_eval_llama.sh --model "$(LLAMA_MODEL)" --variant $$v --task $$t \
-	      --gpus $(GPUS) --ns $(NS) --alpha $(ALPHA) --beta $(BETA) || exit 1; \
-	  done; \
-	done
+run-llama: ## Sweep $(LLAMA_MODEL) (TP=1, auto-parallel)
+	@$(SWEEP) --tp 1 --runner scripts/run_eval_llama.sh --runner_args="--model $(LLAMA_MODEL)"
 
-run-mistral: ## Sweep $(MISTRAL_MODEL) on $(GPUS)
-	@for v in $(VARIANTS); do \
-	  for t in $(TASKS); do \
-	    echo "$(GREEN)>>> $(MISTRAL_MODEL) / $$v / $$t$(RESET)"; \
-	    bash scripts/run_eval_mistral.sh --model "$(MISTRAL_MODEL)" --variant $$v --task $$t \
-	      --gpus $(GPUS) --ns $(NS) --alpha $(ALPHA) --beta $(BETA) || exit 1; \
-	  done; \
-	done
+run-mistral: ## Sweep $(MISTRAL_MODEL) (TP=1, auto-parallel)
+	@$(SWEEP) --tp 1 --runner scripts/run_eval_mistral.sh --runner_args="--model $(MISTRAL_MODEL)"
 
-run-exaone: ## Sweep EXAONE-4.5-33B (TP=2; pass GPUS="0,1")
-	@for v in $(VARIANTS); do \
-	  for t in $(TASKS); do \
-	    echo "$(GREEN)>>> EXAONE-4.5-33B / $$v / $$t$(RESET)"; \
-	    bash scripts/run_eval_exaone.sh --variant $$v --task $$t \
-	      --gpus $(GPUS) --ns $(NS) --alpha $(ALPHA) --beta $(BETA) || exit 1; \
-	  done; \
-	done
+run-exaone: ## Sweep EXAONE-4.5-33B (TP=2, auto-parallel)
+	@$(SWEEP) --tp 2 --runner scripts/run_eval_exaone.sh --runner_args=""
 
 run-all: run-qwen3-8b run-llama run-mistral ## Run qwen3-8b + llama + mistral (skips 32b/exaone)
