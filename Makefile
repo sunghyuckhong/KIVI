@@ -38,6 +38,12 @@ VENV       ?= .venv
 PY         := $(VENV)/bin/python
 PIP        := $(VENV)/bin/pip
 
+# Export PY so subprocesses (parallel_sweep.py → run_eval_*.sh) inherit the
+# venv built by `make setup`. The runners default to ./.venv/bin/python if
+# PY is unset, but that only works when KIVI is run from /workspace/KIVI.
+# Exporting makes any cwd work and lets `PY=... make run-...` override it.
+export PY
+
 # --- Defaults (override on command line or via env) --------------------------
 VARIANTS       ?= bf16 fp8 pertoken smkv
 TASKS          ?= gsm8k_cot minerva_math500 gpqa_main_cot_n_shot_32k

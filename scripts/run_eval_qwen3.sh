@@ -78,7 +78,10 @@ esac
 if [ "$SIZE" = "8b" ]; then TP=1; MNS_P1=64; MNS_P2=24; else TP=2; MNS_P1=24; MNS_P2=8; fi
 
 cd /workspace/KIVI
-PY=/opt/vllm_exaone_v2_env/bin/python3
+# PY: python interpreter to use. Defaults to the .venv that `make setup`
+# builds (which has the rebased fork's `kv_cache_quant_config` support).
+# Override with PY=... for a different env.
+PY="${PY:-./.venv/bin/python}"
 
 # ---- derive max-gen-tokens from model's native context length ----
 # Rule: pass2_mg = 32k if model_max_len >= 32k else model_max_len/2.

@@ -53,7 +53,8 @@ MNS_P1=64; MNS_P2=24
 [ "$TP" -gt 1 ] && { MNS_P1=24; MNS_P2=8; }
 
 cd /workspace/KIVI
-PY=/opt/vllm_exaone_v2_env/bin/python3
+# PY: python interpreter (defaults to .venv from `make setup`).
+PY="${PY:-./.venv/bin/python}"
 
 # ---- derive max-gen-tokens from model's native context length ----
 # Rule: if model_max_len >= 32k, pass2 generates up to 32k; else pass2 is

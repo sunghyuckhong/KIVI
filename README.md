@@ -14,6 +14,14 @@ two-pass adaptive eval with a graph-verification trust gate at each pass.
 | `smoothkv` | Per-step SmoothQuant rescale + INT4 round-trip | `s_K`, `s_V` `.pt` | `÷ s_K` + INT4 + `× s_K` |
 | `smoothkv_fused` | Load-time fold of `s_K` / `s_V` into projection weights, then plain pertoken at inference | `s_K`, `s_V` `.pt` (HUK for q-norm models) | same as `pertoken` |
 
+**Variant tags accepted by `--variant` (CLI shorthands for the methods above):**
+
+| Variant flag | Method | Granularity of `s_K` (Qwen3-8B example) |
+|---|---|---|
+| `bf16` / `fp8` / `pertoken` | as named | n/a |
+| `smkv` | `smoothkv_fused` (HUK auto-on for q-norm models, halfpair) | per-(layer, head_dim) — shared across heads → 36 × 128 = **4,608** unique values |
+| `smkv_per_head` | `smoothkv` runtime kernel, `--no_head_uniform_k`, no halfpair | per-(layer, kv_head, head_dim) → 36 × 8 × 128 = **36,864** unique values |
+
 ## Tasks
 
 | Task | Domain | Set size | Canonical metric |
@@ -153,11 +161,13 @@ All `make run-*` targets read these variables. Override on the command line.
 | `VLLM_FORK_URL` | `https://github.com/sunghyuckhong/vllm-compression-part.git` | Fork remote — `make setup` clones from here if `VLLM_FORK_PATH` is missing. |
 | `VLLM_FORK_PATH` | `/workspace/sunghyuck/vllm-compression-part` | Where the fork lives on disk. |
 | `VLLM_FORK_COMMIT` | (pinned in Makefile) | vllm-compression-part `kv_cache_quant` commit to install. |
+| `PY` | `.venv/bin/python` (set by Makefile) | Python interpreter used by the runners. The runners default to `./.venv/bin/python` if `PY` is unset; the Makefile exports `PY` so subprocesses inherit it. Override with `PY=/path/to/python make run-qwen3-8b ...` if you need a different env. |
 
 Example overrides:
 
 ```bash
 make run-qwen3-8b VARIANTS="bf16 smkv"            # 2 methods only
+make run-qwen3-8b VARIANTS="smkv_per_head"        # per-(head, channel) smoothing (Qwen3 only)
 make run-llama TASKS=gsm8k_cot                     # 1 task only
 make run-qwen3-32b GPUS=0,1,2,3                    # explicit 2-stream pool
 make run-qwen3-8b ALPHA=0.5 BETA=0.5               # different SmoothKV α/β
@@ -200,6 +210,20 @@ Each cell writes three artifacts under `logs/`:
 | `<task>_<model>_<variant>_chat_vllm_adaptive_results.json` | **Final headline number** (pass-1 + pass-2 retried truncated items, merged + rescored) |
 
 Plus per-pass logs in `logs/run_out/*_pass{1,2}_<task>.log`.
+
+### Re-running an existing cell
+
+By default the runners **skip** any cell whose pass-1 `_results.json` already
+exists. To force a re-run (e.g. to pick up new verify-graph stamps after
+upgrading the fork, or because the previous output didn't carry a stamp),
+move the existing artifacts out of the way first:
+
+```bash
+# Re-run e.g. Qwen3-8B BF16 on gsm8k_cot:
+mkdir -p logs/_unstamped
+mv logs/gsm8k_cot_qwen3-8b_bf16_chat_vllm_* logs/_unstamped/
+make run-qwen3-8b VARIANTS=bf16 TASKS=gsm8k_cot
+```
 
 Read the headline number:
 

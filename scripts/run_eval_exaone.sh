@@ -53,7 +53,8 @@ esac
 MODEL_PATH=LGAI-EXAONE/EXAONE-4.5-33B
 MODEL_TAG=exaone-4.5-33b
 cd /workspace/KIVI
-PY=/opt/vllm_exaone_v2_env/bin/python3
+# PY: python interpreter (defaults to .venv from `make setup`).
+PY="${PY:-./.venv/bin/python}"
 
 # ---- derive max-gen-tokens from model's native context length ----
 # Rule: mg = 32k if model_max_len >= 32k else model_max_len/2.
