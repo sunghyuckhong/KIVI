@@ -34,6 +34,16 @@ VLLM_FORK_PATH    ?= /workspace/sunghyuck/vllm-compression-part
 VLLM_FORK_BRANCH  ?= kv_cache_quant
 VLLM_FORK_COMMIT  ?= 675ba44c0a
 
+# Torch version pinned by the vllm fork's pyproject.toml. We install torch
+# from the PyTorch CUDA-12.8 / CUDA-13.0 wheel index *before* the vllm fork
+# install so pip doesn't fall back to whatever PyPI ships by default
+# (which mismatches drivers older than the cu130 minimum). The index URL is
+# picked at runtime based on `nvidia-smi` driver major version (see setup).
+TORCH_VERSION       ?= 2.11.0
+TORCHVISION_VERSION ?= 0.26.0
+# Min driver major version compatible with cu128. cu130 needs >= 575.
+MIN_DRIVER_MAJOR    ?= 555
+
 VENV       ?= .venv
 PY         := $(VENV)/bin/python
 PIP        := $(VENV)/bin/pip
@@ -78,10 +88,31 @@ setup: $(VENV)/bin/activate ## One-time: build vllm fork + venv + install KIVI d
 	fi
 	@echo "$(GREEN)>>> Checkout vllm fork at pinned commit $(VLLM_FORK_COMMIT)$(RESET)"
 	cd $(VLLM_FORK_PATH) && git fetch --all && git checkout $(VLLM_FORK_COMMIT)
+	@# --- Driver-aware PyTorch install -----------------------------------
+	@# nvidia-smi must succeed; otherwise this is the wrong machine.
+	@if ! command -v nvidia-smi >/dev/null 2>&1; then \
+	  echo "ERROR: nvidia-smi not found; cannot detect GPU driver. KIVI eval needs CUDA-capable hardware." >&2; exit 1; \
+	fi
+	@DRIVER=$$(nvidia-smi --query-gpu=driver_version --format=csv,noheader,nounits | head -1); \
+	  DRIVER_MAJOR=$${DRIVER%%.*}; \
+	  if [ "$$DRIVER_MAJOR" -ge 575 ]; then \
+	    PT_INDEX=https://download.pytorch.org/whl/cu130; \
+	    PT_LABEL=cu130; \
+	  elif [ "$$DRIVER_MAJOR" -ge $(MIN_DRIVER_MAJOR) ]; then \
+	    PT_INDEX=https://download.pytorch.org/whl/cu128; \
+	    PT_LABEL=cu128; \
+	  else \
+	    echo "ERROR: NVIDIA driver $$DRIVER (major=$$DRIVER_MAJOR) is too old."  >&2; \
+	    echo "       The vllm-compression-part fork pins torch==$(TORCH_VERSION) which needs CUDA 12.8+ (driver major >= $(MIN_DRIVER_MAJOR))." >&2; \
+	    echo "       Upgrade your NVIDIA driver, or pin a different torch version via TORCH_VERSION=..." >&2; \
+	    exit 1; \
+	  fi; \
+	  echo "$(GREEN)>>> driver=$$DRIVER → installing torch==$(TORCH_VERSION) torchvision==$(TORCHVISION_VERSION) ($$PT_LABEL wheels)$(RESET)"; \
+	  $(PIP) install -U pip wheel && \
+	  $(PIP) install torch==$(TORCH_VERSION) torchvision==$(TORCHVISION_VERSION) --index-url $$PT_INDEX
 	@echo "$(GREEN)>>> Install vllm-compression-part (editable; vllm._C compile ~15-30min)$(RESET)"
-	$(PIP) install -U pip wheel
 	$(PIP) install -e $(VLLM_FORK_PATH)
-	@echo "$(GREEN)>>> Install KIVI deps$(RESET)"
+	@echo "$(GREEN)>>> Install KIVI eval-harness deps (lm-eval, math-verify, ray)$(RESET)"
 	@if [ -f requirements.txt ]; then $(PIP) install -r requirements.txt; \
 	  else echo "$(YELLOW)[setup] no requirements.txt; skipping$(RESET)"; fi
 	@if [ -f setup.py ] || [ -f pyproject.toml ]; then $(PIP) install -e .; \

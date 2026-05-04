@@ -161,6 +161,8 @@ All `make run-*` targets read these variables. Override on the command line.
 | `VLLM_FORK_URL` | `https://github.com/sunghyuckhong/vllm-compression-part.git` | Fork remote — `make setup` clones from here if `VLLM_FORK_PATH` is missing. |
 | `VLLM_FORK_PATH` | `/workspace/sunghyuck/vllm-compression-part` | Where the fork lives on disk. |
 | `VLLM_FORK_COMMIT` | (pinned in Makefile) | vllm-compression-part `kv_cache_quant` commit to install. |
+| `TORCH_VERSION` | `2.11.0` | torch version pinned by the vllm fork's `pyproject.toml`. `make setup` detects driver major version and installs the matching cu128 / cu130 wheel (cu128 for driver major ≥ 555, cu130 for ≥ 575). Aborts with a clear error if driver is older. |
+| `MIN_DRIVER_MAJOR` | `555` | Minimum NVIDIA driver major version compatible with the vllm fork (CUDA 12.8 → driver 555+). Setup errors out below this. |
 | `PY` | `.venv/bin/python` (set by Makefile) | Python interpreter used by the runners. The runners default to `./.venv/bin/python` if `PY` is unset; the Makefile exports `PY` so subprocesses inherit it. Override with `PY=/path/to/python make run-qwen3-8b ...` if you need a different env. |
 | `FORCE` | `0` | Set to `1` to bypass the runner's "skip if outputs exist" gate. Forces both pass-1 and pass-2 to re-run; calibration is unaffected. See "Re-running an existing cell" below. |
 
