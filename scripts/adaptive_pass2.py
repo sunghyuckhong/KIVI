@@ -6,21 +6,16 @@ the shared Attention class via vllm.model_executor.layers.quantization.kv_fake_q
 
 Reads a pass1 _samples.json, finds items whose response hit the cap (raw_resps
 token count >= MG-8), regenerates those at higher MG via vLLM, and re-scores
-the merged set with task-specific scorers (no lm-eval filter chain dependency
-to avoid version-skew bugs).
-
-Scorers:
-  - minerva_math500            → math_verify (sympy boxed-aware)
-  - gsm8k_32k                  → strict-match: regex "answer is +?-?\\d+"
-  - gpqa_main_cot_n_shot_32k   → flexible-extract: regex "\\b\\(([A-D])\\)"
+the merged set with task-specific scorers from ``scoring.py`` (no lm-eval
+filter chain dependency to avoid version-skew bugs).
 
 Usage:
     python adaptive_pass2.py \\
         --samples logs/<task>_<model>_<mtag>_chat_vllm_samples.json \\
-        --task <task> --model_path <hf-id> \\
+        --task <task> --model <hf-id> \\
         --pass1_mg 4096 --pass2_mg 32768 \\
         --max_model_len <ctx> --max_num_seqs 8 --tp 1 \\
-        --model bf16        # | fp8 | pertoken | smoothkv_fused
+        --kv_quant_method bf16   # | fp8 | pertoken | smoothkv_fused
         [--group_size 128] [--bits 4] [--calib_path PATH]
 
 Writes:
@@ -31,7 +26,6 @@ import argparse
 import copy
 import json
 import os
-import re
 import sys
 import warnings
 from pathlib import Path
@@ -40,7 +34,10 @@ warnings.filterwarnings("ignore")
 
 import vllm  # noqa: F401
 sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent))
 from vllm.config import KVCacheQuantConfig
+
+from scoring import SCORERS, get_raw_text
 
 
 def parse_args():
@@ -98,7 +95,7 @@ def build_kv_quant_config(args):
         return KVCacheQuantConfig(method="smoothkv_fused",
                                   group_size=args.group_size, bits=args.bits,
                                   calib_path=args.calib_path)
-    raise ValueError(f"unknown --model {args.kv_quant_method}")
+    raise ValueError(f"unknown --kv_quant_method {args.kv_quant_method}")
 
 
 def extract_prompt(arguments):
@@ -112,114 +109,14 @@ def extract_prompt(arguments):
     return inner
 
 
-def get_raw_text(it):
-    r = it.get("resps") or [""]
-    if isinstance(r, list) and r and isinstance(r[0], list):
-        r = r[0]
-    if isinstance(r, list):
-        return r[0] if r else ""
-    return r if isinstance(r, str) else ""
-
-
 def find_truncated(items, pass1_mg, tokenizer):
+    """Return indices of items whose response hit the pass1 token cap (MG - 8)."""
     out = []
     for i, it in enumerate(items):
         n = len(tokenizer.encode(get_raw_text(it), add_special_tokens=False))
         if n >= pass1_mg - 8:
             out.append(i)
     return out
-
-
-# ---------- task-specific scorers ----------
-
-def score_minerva_math500(items):
-    from math_verify import parse, verify
-    n_correct = 0
-    for it in items:
-        resp = get_raw_text(it)
-        sol = it["doc"].get("solution", "")
-        try:
-            ok = bool(verify(gold=parse(sol), target=parse(resp)))
-        except Exception:
-            ok = False
-        if ok:
-            n_correct += 1
-    return {"math_verify,none": n_correct / len(items),
-            "math_verify_n,none": len(items)}
-
-
-_NUM_RE = re.compile(r"-?\d+(?:,\d{3})*(?:\.\d+)?")
-
-
-def _extract_strict_gsm8k(text: str):
-    """Strict match: 'answer is' or last \\boxed{} or final number after #### / Final Answer:"""
-    # Try \\boxed{}
-    m = re.findall(r"\\boxed\{([^{}]+)\}", text)
-    if m:
-        nums = _NUM_RE.findall(m[-1])
-        if nums:
-            return nums[-1].replace(",", "")
-    # Try "The answer is X"
-    m = re.search(r"answer is[:\s]*\$?(-?\d[\d,]*(?:\.\d+)?)", text, re.IGNORECASE)
-    if m:
-        return m.group(1).replace(",", "")
-    # Try GSM8K-style "#### X"
-    m = re.search(r"####\s*(-?\d[\d,]*(?:\.\d+)?)", text)
-    if m:
-        return m.group(1).replace(",", "")
-    return None
-
-
-def _extract_flex_gsm8k(text: str):
-    """Flexible: last number in text."""
-    nums = _NUM_RE.findall(text)
-    return nums[-1].replace(",", "") if nums else None
-
-
-def score_gsm8k(items):
-    n_strict = 0
-    n_flex = 0
-    for it in items:
-        resp = get_raw_text(it)
-        gold = it["doc"].get("answer", "")
-        # GSM8K gold is "... #### N"
-        g = _NUM_RE.findall(gold)
-        gold_num = g[-1].replace(",", "") if g else gold.strip()
-        s = _extract_strict_gsm8k(resp)
-        f = _extract_flex_gsm8k(resp)
-        if s is not None and s == gold_num:
-            n_strict += 1
-        if f is not None and f == gold_num:
-            n_flex += 1
-    return {"exact_match,strict-match": n_strict / len(items),
-            "exact_match,flexible-extract": n_flex / len(items),
-            "exact_match_n,strict-match": len(items),
-            "exact_match_n,flexible-extract": len(items)}
-
-
-def score_gpqa(items):
-    n_flex = 0
-    for it in items:
-        resp = get_raw_text(it)
-        gold = str(it["doc"].get("answer", "") or it["doc"].get("Correct Answer", "") or "").strip()
-        # gpqa_main_cot_n_shot answer is one of "(A)" "(B)" "(C)" "(D)"
-        m = re.findall(r"\b\(?([A-D])\)?", resp.split("\n")[-1])
-        if not m:
-            m = re.findall(r"\b\(([A-D])\)", resp)
-        pred = m[-1] if m else None
-        gold_letter = gold[1] if gold.startswith("(") and len(gold) >= 3 else gold
-        if pred is not None and pred.upper() == gold_letter.upper():
-            n_flex += 1
-    return {"exact_match,flexible-extract": n_flex / len(items),
-            "exact_match_n,flexible-extract": len(items)}
-
-
-SCORERS = {
-    "minerva_math500": score_minerva_math500,
-    "gsm8k_32k": score_gsm8k,
-    "gsm8k_cot": score_gsm8k,
-    "gpqa_main_cot_n_shot_32k": score_gpqa,
-}
 
 
 def main():
@@ -247,8 +144,8 @@ def main():
         from vllm import LLM, SamplingParams
 
         prompts = [extract_prompt(items[i]["arguments"]) for i in truncated_idx]
-        print(f"[pass2] launching vLLM (model={args.kv_quant_method}, MG={args.pass2_mg}) on "
-              f"{len(prompts)} prompts; first prompt ends with: {repr(prompts[0][-100:])}")
+        print(f"[pass2] launching vLLM (kv_quant_method={args.kv_quant_method}, MG={args.pass2_mg}) "
+              f"on {len(prompts)} prompts; first prompt ends with: {repr(prompts[0][-100:])}")
         llm_kwargs = dict(
             model=args.model, dtype="auto",
             tensor_parallel_size=args.tp,
@@ -279,11 +176,11 @@ def main():
             merged[idx]["resps"] = [txt]
 
     if task_key not in SCORERS:
-        raise ValueError(f"no scorer for task {task_key}; add one in SCORERS")
+        raise ValueError(f"no scorer for task {task_key}; add one in scripts/scoring.py")
     final = SCORERS[task_key](merged)
     print(f"[pass2] final scores on N={len(merged)}:")
     for k, v in sorted(final.items()):
-        if not k.endswith("_n,strict-match") and not k.endswith("_n,flexible-extract") and not k.endswith("_n,none"):
+        if not k.endswith(("_n,strict-match", "_n,flexible-extract", "_n,none")):
             print(f"  {k}: {100*v:.2f}")
 
     stem = str(samples_path).replace("_samples.json", "")
@@ -298,10 +195,8 @@ def main():
     print(f"[pass2] wrote {out_samples}")
     print(f"[pass2] wrote {out_results}")
 
-
     # Verify the FX graph that vLLM compiled actually contained our patched kernels.
     try:
-        sys.path.insert(0, str(Path(__file__).parent))
         from verify_compiled_graph import verify as _verify_graph
         cache_root = os.environ.get("VLLM_CACHE_ROOT") or f"/tmp/vllm_cache_{os.getpid()}"
         ok = _verify_graph(args.kv_quant_method, cache_root, verbose=True)
