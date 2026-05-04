@@ -235,6 +235,7 @@ def score_gpqa(items):
 SCORERS = {
     "minerva_math500": score_minerva_math500,
     "gsm8k_32k": score_gsm8k,
+    "gsm8k_cot": score_gsm8k,
     "gpqa_main_cot_n_shot_32k": score_gpqa,
 }
 
