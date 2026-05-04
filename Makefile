@@ -30,7 +30,7 @@ SHELL := /bin/bash
 # Pinned commit on kv_cache_quant; bump after re-verifying graph capture.
 VLLM_FORK_PATH    ?= /workspace/sunghyuck/vllm-compression-part
 VLLM_FORK_BRANCH  ?= kv_cache_quant
-VLLM_FORK_COMMIT  ?= 675ba44c0
+VLLM_FORK_COMMIT  ?= 675ba44c0a
 
 VENV       ?= .venv
 PY         := $(VENV)/bin/python
