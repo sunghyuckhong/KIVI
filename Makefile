@@ -154,6 +154,9 @@ run-qwen3-8b: ## Sweep Qwen3-8B (TP=1, auto-parallel)
 run-qwen3-32b: ## Sweep Qwen3-32B (TP=2, auto-parallel; e.g. 8 idle GPUs → 4 streams)
 	@$(SWEEP) --tp 2 --runner scripts/run_eval_qwen3.sh --runner_args="--size 32b"
 
+run-qwen3-30b-a3b: ## Sweep Qwen3-30B-A3B MoE (TP=2, auto-parallel; e.g. 8 idle GPUs → 4 streams)
+	@$(SWEEP) --tp 2 --runner scripts/run_eval_qwen3.sh --runner_args="--size 30b-a3b"
+
 run-llama: ## Sweep $(LLAMA_MODEL) (TP=1, auto-parallel)
 	@$(SWEEP) --tp 1 --runner scripts/run_eval_llama.sh --runner_args="--model $(LLAMA_MODEL)"
 

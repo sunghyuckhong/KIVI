@@ -60,11 +60,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -z "$SIZE" ] || [ -z "$VARIANT" ] || [ -z "$TASK" ] && {
-  /usr/bin/echo "Required: --size {8b|32b} --variant {bf16|fp8|pertoken|smkv|smkv_per_head} --task {gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot_32k}"
+  /usr/bin/echo "Required: --size {8b|32b|30b-a3b} --variant {bf16|fp8|pertoken|smkv|smkv_per_head} --task {gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot_32k}"
   exit 1
 }
 
-case "$SIZE" in 8b|32b) ;; *) /usr/bin/echo "size must be 8b or 32b"; exit 1 ;; esac
+case "$SIZE" in 8b|32b|30b-a3b) ;; *) /usr/bin/echo "size must be 8b|32b|30b-a3b"; exit 1 ;; esac
 MODEL_PATH="Qwen/Qwen3-${SIZE^^}"
 MODEL_TAG="qwen3-${SIZE}"
 
@@ -74,8 +74,14 @@ case "$TASK" in
   *) /usr/bin/echo "task must be gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot_32k"; exit 1 ;;
 esac
 
-# TP based on size (8B → TP=1, 32B → TP=2). Default max_num_seqs.
-if [ "$SIZE" = "8b" ]; then TP=1; MNS_P1=64; MNS_P2=24; else TP=2; MNS_P1=24; MNS_P2=8; fi
+# TP based on size (8B → TP=1, 32B/30B-A3B → TP=2). Default max_num_seqs.
+# Qwen3-30B-A3B is MoE (3B active), so KV memory budget is ~3× the 32B dense
+# model — use a higher MNS for throughput.
+case "$SIZE" in
+  8b)      TP=1; MNS_P1=64; MNS_P2=24 ;;
+  32b)     TP=2; MNS_P1=24; MNS_P2=8 ;;
+  30b-a3b) TP=2; MNS_P1=32; MNS_P2=20 ;;  # MoE: ~3× KV headroom vs 32B dense
+esac
 
 cd /workspace/KIVI
 # PY: python interpreter to use. Defaults to the .venv that `make setup`
