@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-# Make repo root importable so tests can `from vllm_custom...`, `from quant...`, etc.
+# Make repo root importable so tests can `from quant...`, etc.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 

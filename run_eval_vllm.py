@@ -23,7 +23,7 @@ warnings.filterwarnings("ignore")
 import vllm  # noqa: F401
 import vllm.model_executor.models.llama  # noqa: F401
 
-from vllm_custom import patches
+from vllm.model_executor.layers.quantization.kv_fake_quant import configure_kv_quant
 
 
 DEFAULT_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
@@ -120,14 +120,15 @@ def install_method(args):
     _isolate_compile_cache()
 
     if args.model in ("bf16", "fp16"):
-        return  # no patch — unquantized baseline
+        return  # no quant — unquantized baseline
     if args.model == "fp8":
-        patches.install_fp8(group_size=args.group_size)
+        configure_kv_quant("fp8", group_size=args.group_size)
     elif args.model == "pertoken":
-        patches.install_pertoken_int4(group_size=args.group_size)
+        configure_kv_quant("pertoken", group_size=args.group_size, bits=args.bits)
     elif args.model == "smoothkv":
         assert args.calib_path, "--calib_path required for smoothkv"
-        patches.install_smoothkv(args.calib_path, group_size=args.group_size, bits=args.bits)
+        configure_kv_quant("smoothkv", group_size=args.group_size, bits=args.bits,
+                           calib_path=args.calib_path)
     elif args.model == "smoothkv_fused":
         # Zero-runtime-cost path: write per-GPU JSON config; kivi_vllm_plugin
         # (auto-loaded as a vllm.general_plugins entry point) reads it and
@@ -144,7 +145,7 @@ def install_method(args):
             json.dump(cfg, f)
         print(f"  [smoothkv_fused] wrote {cfg_path}: {cfg}")
     elif args.model == "kivi":
-        patches.install_kivi2(group_size=32, residual=128)
+        configure_kv_quant("kivi2", group_size=32)
 
 
 def output_name(args):

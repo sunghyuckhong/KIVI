@@ -83,22 +83,19 @@ def install_method(args):
             json.dump(cfg, f)
         print(f"[retry] wrote {cfg_path}: {cfg}")
         return
-    # Other methods use the runtime fake-quant patch in vllm_custom.patches
+    # Other methods configure KV fake-quant via the vllm fork API.
     import vllm  # noqa: F401
-    try: import vllm.model_executor.models.qwen3  # noqa: F401
-    except ImportError: pass
-    try: import vllm.model_executor.models.exaone4  # noqa: F401
-    except ImportError: pass
-    from vllm_custom import patches
+    from vllm.model_executor.layers.quantization.kv_fake_quant import configure_kv_quant
     if args.model == "fp8":
-        patches.install_fp8(group_size=args.group_size)
+        configure_kv_quant("fp8", group_size=args.group_size)
     elif args.model == "pertoken":
-        patches.install_pertoken_int4(group_size=args.group_size)
+        configure_kv_quant("pertoken", group_size=args.group_size, bits=args.bits)
     elif args.model == "smoothkv":
         assert args.calib_path, "--calib_path required for smoothkv"
-        patches.install_smoothkv(args.calib_path, group_size=args.group_size, bits=args.bits)
+        configure_kv_quant("smoothkv", group_size=args.group_size, bits=args.bits,
+                           calib_path=args.calib_path)
     elif args.model == "kivi":
-        patches.install_kivi2(group_size=32, residual=128)
+        configure_kv_quant("kivi2", group_size=32)
 
 
 # ---------- truncation detection ----------

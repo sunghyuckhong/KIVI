@@ -12,7 +12,7 @@ import glob
 import os
 import torch
 
-from vllm_custom.fake_quant_utils import (
+from vllm.model_executor.layers.quantization.kv_fake_quant import (
     fake_quantize_fp8,
     fake_quantize_k_pertoken,
     fake_quantize_v_pertoken,

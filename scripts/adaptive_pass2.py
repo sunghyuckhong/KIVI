@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Pass 2: regenerate truncated pass1 samples at higher MG, merge, and re-score.
 
-Model-agnostic — works for any model that vllm_custom.patches supports
-(Llama-3, Mistral, Qwen3, Qwen3-MoE, Qwen2, Exaone4).
+Model-agnostic — works for any vLLM model (KV fake-quant is wired into
+the shared Attention class via vllm.model_executor.layers.quantization.kv_fake_quant).
 
 Reads a pass1 _samples.json, finds items whose response hit the cap (raw_resps
 token count >= MG-8), regenerates those at higher MG via vLLM, and re-scores
@@ -40,7 +40,7 @@ warnings.filterwarnings("ignore")
 
 import vllm  # noqa: F401
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from vllm_custom import patches  # imports + patches all supported attention classes
+from vllm.model_executor.layers.quantization.kv_fake_quant import configure_kv_quant
 
 
 def parse_args():
@@ -100,12 +100,13 @@ def install_method(args):
     if args.model in ("bf16", "fp16"):
         return
     if args.model == "fp8":
-        patches.install_fp8(group_size=args.group_size)
+        configure_kv_quant("fp8", group_size=args.group_size)
     elif args.model == "pertoken":
-        patches.install_pertoken_int4(group_size=args.group_size)
+        configure_kv_quant("pertoken", group_size=args.group_size, bits=args.bits)
     elif args.model == "smoothkv":
         assert args.calib_path
-        patches.install_smoothkv(args.calib_path, group_size=args.group_size, bits=args.bits)
+        configure_kv_quant("smoothkv", group_size=args.group_size, bits=args.bits,
+                           calib_path=args.calib_path)
     elif args.model == "smoothkv_fused":
         assert args.calib_path
         visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
@@ -116,7 +117,7 @@ def install_method(args):
                        "group_size": args.group_size,
                        "bits": args.bits}, f)
         print(f"  [smoothkv_fused] wrote {cfg_path}")
-        patches.install_pertoken_int4(group_size=args.group_size)
+        configure_kv_quant("pertoken", group_size=args.group_size, bits=args.bits)
 
 
 def extract_prompt(arguments):
