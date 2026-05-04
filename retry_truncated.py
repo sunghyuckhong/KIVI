@@ -50,7 +50,7 @@ def parse_args():
     # vLLM model spec (only required when generating)
     p.add_argument("--model_path", default="Qwen/Qwen3-8B")
     p.add_argument("--model", choices=["bf16", "fp16", "fp8", "pertoken", "smoothkv",
-                                        "smoothkv_fused", "kivi"], default="bf16")
+                                        "smoothkv_fused"], default="bf16")
     p.add_argument("--orig_mg", type=int, default=4096,
                    help="max_gen_toks used in first pass (truncation threshold)")
     p.add_argument("--retry_mg", type=int, default=32768,
@@ -85,8 +85,6 @@ def install_method(args):
         assert args.calib_path, "--calib_path required for smoothkv_fused"
         configure_kv_quant("smoothkv_fused", group_size=args.group_size,
                            bits=args.bits, calib_path=args.calib_path)
-    elif args.model == "kivi":
-        configure_kv_quant("kivi2", group_size=32)
 
 
 # ---------- truncation detection ----------

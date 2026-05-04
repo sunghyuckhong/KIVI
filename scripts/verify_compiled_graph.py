@@ -14,7 +14,6 @@ Per-variant signatures we look for:
     pertoken      → quant_and_pack_vcache (the int4 kernel)
     smoothkv      → quant_and_pack_vcache (post-smoothing K/V quant)
     smoothkv_fused → quant_and_pack_vcache (after k_norm γ fusion)
-    kivi          → quant_and_pack_kcache + quant_and_pack_vcache
 
 Returns 0 if all expected signatures present and no forbidden ones; 1 otherwise.
 
@@ -35,7 +34,6 @@ EXPECTED = {
     "pertoken":       ["quant_and_pack_vcache", "unpack_and_dequant_vcache"],
     "smoothkv":       ["quant_and_pack_vcache"],
     "smoothkv_fused": ["quant_and_pack_vcache"],
-    "kivi":           ["quant_and_pack_kcache", "quant_and_pack_vcache"],
 }
 
 FORBIDDEN = {
@@ -96,7 +94,7 @@ def verify(variant: str, cache_root: str, verbose: bool = True) -> bool:
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--variant", required=True,
-                   help="bf16 | fp16 | fp8 | pertoken | smoothkv | smoothkv_fused | kivi")
+                   help="bf16 | fp16 | fp8 | pertoken | smoothkv | smoothkv_fused")
     p.add_argument("--cache_root", default=None,
                    help="Path to per-PID cache. Defaults to $VLLM_CACHE_ROOT or /tmp/vllm_cache_<pid>.")
     p.add_argument("--quiet", action="store_true")

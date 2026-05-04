@@ -31,7 +31,7 @@ DEFAULT_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--model",       choices=["bf16", "fp16", "fp8", "pertoken", "smoothkv", "smoothkv_fused", "kivi"], required=True,
+    p.add_argument("--model",       choices=["bf16", "fp16", "fp8", "pertoken", "smoothkv", "smoothkv_fused"], required=True,
                    help="bf16/fp16 are the same no-quant baseline (dtype=auto picks the model's native dtype). "
                         "smoothkv_fused: fold s_K into q_norm/k_norm γ (or qkv_proj rows for non-q-norm "
                         "models) at load time — zero per-step cost beyond pertoken int4.")
@@ -108,8 +108,6 @@ def install_method(args):
         assert args.calib_path, "--calib_path required for smoothkv_fused"
         configure_kv_quant("smoothkv_fused", group_size=args.group_size,
                            bits=args.bits, calib_path=args.calib_path)
-    elif args.model == "kivi":
-        configure_kv_quant("kivi2", group_size=32)
 
 
 def output_name(args):
@@ -143,8 +141,6 @@ def output_name(args):
         except ValueError:
             calib_tag = stem
         return f"{t}_{m}_smoothkv_fused_g{args.group_size}_{calib_tag}{chat}_vllm"
-    if args.model == "kivi":
-        return f"{t}_{m}_kivi_res128{chat}_vllm"
     raise ValueError(f"unknown model {args.model}")
 
 

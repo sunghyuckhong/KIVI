@@ -27,7 +27,6 @@ EXPECTED_OPS = {
     "fp8":      ["fake_quantize_dequantize_fp8"],
     "pertoken": ["quant_and_pack_vcache", "unpack_and_dequant_vcache"],
     "smoothkv": ["quant_and_pack_vcache", "unpack_and_dequant_vcache"],
-    "kivi2":    ["quant_and_pack_vcache", "unpack_and_dequant_vcache"],
 }
 FORBIDDEN_OPS = {
     # bf16/fp16 must NOT contain any quant kernel calls.
@@ -69,17 +68,13 @@ def _has_substr(names: list[str], sub: str) -> bool:
 
 
 @requires_cuda
-@pytest.mark.parametrize("method", ["fp8", "pertoken", "kivi2"])
+@pytest.mark.parametrize("method", ["fp8", "pertoken"])
 def test_apply_kv_quant_emits_expected_ops(method):
     """For each method, the captured graph must contain every expected op
     signature and none of the forbidden ones."""
     from vllm.model_executor.layers.quantization.kv_fake_quant import apply_kv_quant
 
-    layer = _MockLayer(
-        method,
-        group_size=32 if method == "kivi2" else 128,
-        bits=2 if method == "kivi2" else 4,
-    )
+    layer = _MockLayer(method, group_size=128, bits=4)
 
     def fn(k, v):
         return apply_kv_quant(layer, k, v)
@@ -124,7 +119,7 @@ def test_apply_kv_quant_smoothkv_emits_expected_ops():
 def test_bf16_emits_no_quant_ops():
     """bf16 must be a no-op -- apply_kv_quant returns immediately on the
     method check, so no quant op should ever appear in the graph."""
-    # apply_kv_quant raises on bf16 (only branches are fp8/pertoken/smoothkv/kivi2).
+    # apply_kv_quant raises on bf16 (only branches are fp8/pertoken/smoothkv).
     # Verifying the no-op happens via attach_kv_quant_to_layer which doesn't
     # set _kv_quant_method on bf16 -- so Attention.forward's `if getattr(...)`
     # short-circuits. We exercise that short-circuit here.
@@ -152,7 +147,7 @@ def test_bf16_emits_no_quant_ops():
 
 
 @requires_cuda
-@pytest.mark.parametrize("method", ["fp8", "pertoken", "smoothkv", "kivi2"])
+@pytest.mark.parametrize("method", ["fp8", "pertoken", "smoothkv"])
 def test_apply_kv_quant_preserves_dtype_and_shape(method):
     """Round-trip parity check: apply_kv_quant returns same shape & dtype."""
     from vllm.model_executor.layers.quantization.kv_fake_quant import apply_kv_quant
@@ -161,12 +156,7 @@ def test_apply_kv_quant_preserves_dtype_and_shape(method):
     if method == "smoothkv":
         kwargs["sk"] = torch.ones(8, 128, dtype=torch.bfloat16, device="cuda")
         kwargs["sv"] = torch.ones(8, 128, dtype=torch.bfloat16, device="cuda")
-    layer = _MockLayer(
-        method,
-        group_size=32 if method == "kivi2" else 128,
-        bits=2 if method == "kivi2" else 4,
-        **kwargs,
-    )
+    layer = _MockLayer(method, group_size=128, bits=4, **kwargs)
 
     k = torch.randn(8, 8 * 128, dtype=torch.bfloat16, device="cuda")
     v = torch.randn(8, 8 * 128, dtype=torch.bfloat16, device="cuda")

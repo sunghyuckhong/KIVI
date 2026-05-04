@@ -49,7 +49,7 @@ def parse_args():
     p.add_argument("--task", required=True)
     p.add_argument("--model_path", required=True)
     p.add_argument("--model",
-                   choices=["bf16", "fp16", "fp8", "pertoken", "smoothkv", "smoothkv_fused", "kivi"],
+                   choices=["bf16", "fp16", "fp8", "pertoken", "smoothkv", "smoothkv_fused"],
                    required=True)
     p.add_argument("--calib_path", default=None)
     p.add_argument("--group_size", type=int, default=128)
