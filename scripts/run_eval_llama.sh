@@ -107,7 +107,8 @@ P2_LOG=logs/run_out/${MODEL_TAG}_${VARIANT_TAG}_pass2_${TASK}.log
 /bin/mkdir -p logs/run_out logs/calib
 
 # ---- Pass 1 ----
-# Set FORCE=1 to redo a cell whose outputs already exist.
+# Set FORCE=1 to redo a cell whose outputs already exist. Verify-graph
+# stamp is only checked on a fresh run — SKIP path trusts existing data.
 FORCE="${FORCE:-0}"
 if [ "$FORCE" = "1" ] || [ ! -f "$SAMPLES" ] || [ ! -f "$RESULTS" ]; then
   /usr/bin/echo "[pass1] $TASK  on $MODEL_PATH  (TP=$TP, MG=$PASS1_MG)"
@@ -117,28 +118,30 @@ if [ "$FORCE" = "1" ] || [ ! -f "$SAMPLES" ] || [ ! -f "$RESULTS" ]; then
       --max_gen_toks $PASS1_MG --max_model_len $MML4 \
       --max_num_seqs $MNS_P1 --batch_size $MNS_P1 --tp $TP \
       --log_samples 2>&1 | /usr/bin/tee "$P1_LOG"
+  /usr/bin/grep -q "\[verify-graph\]" "$P1_LOG" || { /usr/bin/echo "ERROR: pass1 NO stamp"; exit 2; }
+  /usr/bin/grep "\[verify-graph\]" "$P1_LOG" | /usr/bin/grep -qE "FAIL" && { /usr/bin/echo "ERROR: pass1 FAIL"; exit 2; }
+  /usr/bin/echo "[pass1] verify-graph: PASS"
+else
+  /usr/bin/echo "[pass1] SKIP — samples + results exist (set FORCE=1 to override)"
 fi
-/usr/bin/grep -q "\[verify-graph\]" "$P1_LOG" || { /usr/bin/echo "ERROR: pass1 NO stamp"; exit 2; }
-/usr/bin/grep "\[verify-graph\]" "$P1_LOG" | /usr/bin/grep -qE "FAIL" && { /usr/bin/echo "ERROR: pass1 FAIL"; exit 2; }
-/usr/bin/echo "[pass1] verify-graph: PASS"
 
 # ---- Pass 2 (skip if pass1_mg == pass2_mg — pass2 would just re-run identical) ----
 if [ "$PASS1_MG" -eq "$PASS2_MG" ]; then
   /usr/bin/echo "[pass2] skipped (pass1_mg == pass2_mg == $PASS1_MG; model_max_len=$MODEL_MAX_LEN doesn't allow longer retry)"
   /bin/cp "$RESULTS" "$ADAPTIVE"
-else
-  if [ "$FORCE" = "1" ] || [ ! -f "$ADAPTIVE" ]; then
-    /usr/bin/echo "[pass2] retry truncated subset @ MG=$PASS2_MG"
-    CUDA_VISIBLE_DEVICES=$GPUS $PY scripts/adaptive_pass2.py \
-        --samples "$SAMPLES" --task "$TASK" --model "$MODEL_PATH" \
-        $METHOD_ARGS \
-        --pass1_mg $PASS1_MG --pass2_mg $PASS2_MG \
-        --max_model_len $MML32 --max_num_seqs $MNS_P2 --tp $TP \
-        2>&1 | /usr/bin/tee "$P2_LOG"
-  fi
+elif [ "$FORCE" = "1" ] || [ ! -f "$ADAPTIVE" ]; then
+  /usr/bin/echo "[pass2] retry truncated subset @ MG=$PASS2_MG"
+  CUDA_VISIBLE_DEVICES=$GPUS $PY scripts/adaptive_pass2.py \
+      --samples "$SAMPLES" --task "$TASK" --model "$MODEL_PATH" \
+      $METHOD_ARGS \
+      --pass1_mg $PASS1_MG --pass2_mg $PASS2_MG \
+      --max_model_len $MML32 --max_num_seqs $MNS_P2 --tp $TP \
+      2>&1 | /usr/bin/tee "$P2_LOG"
   /usr/bin/grep -q "\[verify-graph\]" "$P2_LOG" || { /usr/bin/echo "ERROR: pass2 NO stamp"; exit 2; }
   /usr/bin/grep "\[verify-graph\]" "$P2_LOG" | /usr/bin/grep -qE "FAIL" && { /usr/bin/echo "ERROR: pass2 FAIL"; exit 2; }
   /usr/bin/echo "[pass2] verify-graph: PASS"
+else
+  /usr/bin/echo "[pass2] SKIP — adaptive_results.json exists (set FORCE=1 to override)"
 fi
 
 /usr/bin/echo ""

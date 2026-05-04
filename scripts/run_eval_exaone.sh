@@ -116,7 +116,8 @@ RESULT=logs/${TASK}_${MODEL_TAG}_${VARIANT_TAG}_chat_vllm_results.json
 /bin/mkdir -p logs/run_out logs/calib
 
 # ---- single-pass run ----
-# Set FORCE=1 to redo a cell whose outputs already exist.
+# Set FORCE=1 to redo a cell whose outputs already exist. Verify-graph
+# stamp is only checked on a fresh run — SKIP path trusts existing data.
 FORCE="${FORCE:-0}"
 if [ "$FORCE" != "1" ] && [ -f "$RESULT" ]; then
   /usr/bin/echo "[run] SKIP — results.json exists (set FORCE=1 to override)"
@@ -128,18 +129,16 @@ else
       --max_gen_toks $MG --max_model_len $MML \
       --max_num_seqs 8 --batch_size 8 --tp 2 \
       --log_samples 2>&1 | /usr/bin/tee "$LOG"
+  if ! /usr/bin/grep -q "\[verify-graph\]" "$LOG" 2>/dev/null; then
+    /usr/bin/echo "ERROR: NO verify-graph stamp. Aborting." >&2
+    exit 2
+  fi
+  if /usr/bin/grep "\[verify-graph\]" "$LOG" | /usr/bin/grep -qE "FAIL"; then
+    /usr/bin/echo "ERROR: verify-graph FAILED. Aborting." >&2
+    exit 2
+  fi
+  /usr/bin/echo "[run] verify-graph: PASS"
 fi
-
-# Verify graph stamp
-if ! /usr/bin/grep -q "\[verify-graph\]" "$LOG" 2>/dev/null; then
-  /usr/bin/echo "ERROR: NO verify-graph stamp. Aborting." >&2
-  exit 2
-fi
-if /usr/bin/grep "\[verify-graph\]" "$LOG" | /usr/bin/grep -qE "FAIL"; then
-  /usr/bin/echo "ERROR: verify-graph FAILED. Aborting." >&2
-  exit 2
-fi
-/usr/bin/echo "[run] verify-graph: PASS"
 /usr/bin/echo ""
 /usr/bin/echo "=================================================================="
 /usr/bin/echo "✅ DONE — $MODEL_TAG / $VARIANT / $TASK graph-verified"

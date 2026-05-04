@@ -216,20 +216,21 @@ else
       --max_gen_toks $PASS1_MG --max_model_len $MML4 \
       --max_num_seqs $MNS_P1 --batch_size $MNS_P1 --tp $TP \
       --log_samples 2>&1 | /usr/bin/tee "$P1_LOG"
+  # Verify pass1 stamp (only on a fresh run — SKIP path trusts existing data;
+  # use FORCE=1 to redo + re-stamp).
+  if ! /usr/bin/grep -q "\[verify-graph\]" "$P1_LOG" 2>/dev/null; then
+    /usr/bin/echo "ERROR: pass1 has NO verify-graph stamp. Aborting." >&2
+    exit 2
+  fi
+  if /usr/bin/grep "\[verify-graph\]" "$P1_LOG" | /usr/bin/grep -qE "FAIL"; then
+    /usr/bin/echo "ERROR: pass1 verify-graph FAILED. Aborting." >&2
+    exit 2
+  fi
+  /usr/bin/echo "[pass1] verify-graph: PASS"
 fi
-
-# Verify pass1 stamp
-if ! /usr/bin/grep -q "\[verify-graph\]" "$P1_LOG" 2>/dev/null; then
-  /usr/bin/echo "ERROR: pass1 has NO verify-graph stamp. Aborting." >&2
-  exit 2
-fi
-if /usr/bin/grep "\[verify-graph\]" "$P1_LOG" | /usr/bin/grep -qE "FAIL"; then
-  /usr/bin/echo "ERROR: pass1 verify-graph FAILED. Aborting." >&2
-  exit 2
-fi
-/usr/bin/echo "[pass1] verify-graph: PASS"
 
 # ---- Pass 2 (skip if pass1_mg == pass2_mg — pass2 would be redundant) ----
+PASS2_RAN=0
 if [ "$PASS1_MG" -eq "$PASS2_MG" ]; then
   /usr/bin/echo "[pass2] skipped (pass1_mg == pass2_mg == $PASS1_MG; model_max_len=$MODEL_MAX_LEN doesn't allow longer retry)"
   /bin/cp "$RESULTS" "$ADAPTIVE"
@@ -243,10 +244,12 @@ else
       --pass1_mg $PASS1_MG --pass2_mg $PASS2_MG \
       --max_model_len $MML32 --max_num_seqs $MNS_P2 --tp $TP \
       2>&1 | /usr/bin/tee "$P2_LOG"
+  PASS2_RAN=1
 fi
 
-# Verify pass2 stamp (only if pass2 actually ran)
-if [ "$PASS1_MG" -ne "$PASS2_MG" ]; then
+# Verify pass2 stamp only if pass2 actually ran in this session
+# (SKIP path trusts existing data; use FORCE=1 to redo + re-stamp).
+if [ "$PASS2_RAN" = "1" ]; then
   if ! /usr/bin/grep -q "\[verify-graph\]" "$P2_LOG" 2>/dev/null; then
     /usr/bin/echo "ERROR: pass2 has NO verify-graph stamp. Aborting." >&2
     exit 2
