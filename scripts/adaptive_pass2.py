@@ -63,23 +63,6 @@ def parse_args():
     return p.parse_args()
 
 
-def _clear_stale_plugin_cfg():
-    """Remove any /tmp/kivi_active_<GPU>.json that could leak into this run.
-    The kivi_vllm_plugin auto-loads on every vLLM startup and would otherwise
-    silently override Attention.forward with a stale config from an earlier
-    smoothkv_fused run. Without this, bf16/fp8/pertoken pass2 jobs would be
-    contaminated."""
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-    candidates = {
-        f"/tmp/kivi_active_{visible}.json",
-        f"/tmp/kivi_active_{visible.replace(',', '')}.json",
-    }
-    for p in candidates:
-        if os.path.exists(p):
-            os.remove(p)
-            print(f"  [plugin-guard] removed stale {p}")
-
-
 def _isolate_compile_cache():
     """Per-PID VLLM_CACHE_ROOT to avoid cross-variant graph-hash collisions
     AND triton-cubin races between concurrent launches. See
@@ -93,8 +76,6 @@ def _isolate_compile_cache():
 
 
 def install_method(args):
-    # ALWAYS clear stale plugin cfg + compile cache first.
-    _clear_stale_plugin_cfg()
     _isolate_compile_cache()
 
     if args.model in ("bf16", "fp16"):
@@ -109,15 +90,8 @@ def install_method(args):
                            calib_path=args.calib_path)
     elif args.model == "smoothkv_fused":
         assert args.calib_path
-        visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-        cfg_path = f"/tmp/kivi_active_{visible}.json"
-        with open(cfg_path, "w") as f:
-            json.dump({"method": "smoothkv_fused",
-                       "calib_path": os.path.abspath(args.calib_path),
-                       "group_size": args.group_size,
-                       "bits": args.bits}, f)
-        print(f"  [smoothkv_fused] wrote {cfg_path}")
-        configure_kv_quant("pertoken", group_size=args.group_size, bits=args.bits)
+        configure_kv_quant("smoothkv_fused", group_size=args.group_size,
+                           bits=args.bits, calib_path=args.calib_path)
 
 
 def extract_prompt(arguments):

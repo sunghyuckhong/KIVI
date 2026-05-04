@@ -29,7 +29,7 @@ SHELL := /bin/bash
 # Pinned commit on smoothkv_exp; bump after re-verifying graph capture.
 VLLM_FORK_PATH    ?= /workspace/vllm-compression-part
 VLLM_FORK_BRANCH  ?= smoothkv_exp
-VLLM_FORK_COMMIT  ?= 3db6619600
+VLLM_FORK_COMMIT  ?= 99416cbf31
 
 VENV       ?= .venv
 PY         := $(VENV)/bin/python

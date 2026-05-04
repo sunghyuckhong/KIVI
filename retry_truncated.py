@@ -71,19 +71,6 @@ def install_method(args):
     """Activate KV-quant patches for this process. Only used when generating."""
     if args.model in ("bf16", "fp16"):
         return
-    if args.model == "smoothkv_fused":
-        # kivi_vllm_plugin reads /tmp/kivi_active_<GPU>.json and gamma-folds at load
-        visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-        cfg_path = f"/tmp/kivi_active_{visible}.json"
-        cfg = {"method": "smoothkv_fused",
-               "calib_path": os.path.abspath(args.calib_path),
-               "group_size": args.group_size,
-               "bits": args.bits}
-        with open(cfg_path, "w") as f:
-            json.dump(cfg, f)
-        print(f"[retry] wrote {cfg_path}: {cfg}")
-        return
-    # Other methods configure KV fake-quant via the vllm fork API.
     import vllm  # noqa: F401
     from vllm.model_executor.layers.quantization.kv_fake_quant import configure_kv_quant
     if args.model == "fp8":
@@ -94,6 +81,10 @@ def install_method(args):
         assert args.calib_path, "--calib_path required for smoothkv"
         configure_kv_quant("smoothkv", group_size=args.group_size, bits=args.bits,
                            calib_path=args.calib_path)
+    elif args.model == "smoothkv_fused":
+        assert args.calib_path, "--calib_path required for smoothkv_fused"
+        configure_kv_quant("smoothkv_fused", group_size=args.group_size,
+                           bits=args.bits, calib_path=args.calib_path)
     elif args.model == "kivi":
         configure_kv_quant("kivi2", group_size=32)
 

@@ -33,8 +33,8 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--model",       choices=["bf16", "fp16", "fp8", "pertoken", "smoothkv", "smoothkv_fused", "kivi"], required=True,
                    help="bf16/fp16 are the same no-quant baseline (dtype=auto picks the model's native dtype). "
-                        "smoothkv_fused: gamma-fold s_K into q_norm/k_norm at load time (zero per-step "
-                        "cost beyond pertoken int4) — uses kivi_vllm_plugin via /tmp/kivi_active_<GPU>.json.")
+                        "smoothkv_fused: fold s_K into q_norm/k_norm γ (or qkv_proj rows for non-q-norm "
+                        "models) at load time — zero per-step cost beyond pertoken int4.")
     p.add_argument("--task",        required=True,
                    help="e.g. truthfulqa_gen, coqa, gsm8k_32k, gpqa_diamond_cot_n_shot_32k, math500_32k")
     p.add_argument("--model_path",  default=DEFAULT_MODEL)
@@ -58,30 +58,6 @@ def parse_args():
                    help="Override task's num_fewshot. Useful for tasks like gpqa whose "
                         "_n_shot YAML doesn't actually specify a shot count (defaults to 0).")
     return p.parse_args()
-
-
-def _clear_stale_plugin_cfg():
-    """Remove any /tmp/kivi_active_<GPU>.json that could leak into this run.
-
-    The kivi_vllm_plugin auto-loads on every vLLM startup and reads
-    /tmp/kivi_active_<CUDA_VISIBLE_DEVICES>.json unconditionally. If a stale
-    cfg from a prior smoothkv_fused run is still on disk, the plugin will
-    silently override Attention.forward to apply that method — contaminating
-    bf16/fp8/pertoken runs with int4 quant + SmoothKV fusion.
-
-    This deletes the cfg matching the current CUDA_VISIBLE_DEVICES (and any
-    pair-form like "0,1") at the start of every run. install_method() then
-    re-writes the cfg only for smoothkv_fused.
-    """
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-    candidates = {
-        f"/tmp/kivi_active_{visible}.json",
-        f"/tmp/kivi_active_{visible.replace(',', '')}.json",
-    }
-    for p in candidates:
-        if os.path.exists(p):
-            os.remove(p)
-            print(f"  [plugin-guard] removed stale {p}")
 
 
 def _isolate_compile_cache():
@@ -108,15 +84,9 @@ def _isolate_compile_cache():
 
 
 def install_method(args):
-    """Patch vLLM's LlamaAttention with the requested fake-quant hook."""
-    # ALWAYS clear any stale per-GPU plugin cfg before installing anything.
-    # Without this, a leftover cfg from a previous smoothkv_fused run silently
-    # contaminates the current run via the auto-loaded kivi_vllm_plugin.
-    _clear_stale_plugin_cfg()
-    # ALSO wipe vLLM's torch.compile cache. Without this, a previous variant's
-    # compiled graph (e.g. bf16's) can be loaded for the current variant if
-    # vLLM's content-addressed cache hash collides — and the runtime monkey-
-    # patch never makes it into the captured kernels.
+    """Configure vLLM's KV fake-quant scheme for the requested method."""
+    # Per-PID compile cache: avoids cross-variant FX-graph hash collisions
+    # AND triton-cubin races between concurrent launches.
     _isolate_compile_cache()
 
     if args.model in ("bf16", "fp16"):
@@ -130,20 +100,14 @@ def install_method(args):
         configure_kv_quant("smoothkv", group_size=args.group_size, bits=args.bits,
                            calib_path=args.calib_path)
     elif args.model == "smoothkv_fused":
-        # Zero-runtime-cost path: write per-GPU JSON config; kivi_vllm_plugin
-        # (auto-loaded as a vllm.general_plugins entry point) reads it and
-        # calls fuse_smoothkv_into_model on Worker.load_model. Per-step
-        # Attention.forward then runs only plain pertoken int4.
+        # Zero-runtime-cost path: configure_kv_quant("smoothkv_fused") loads
+        # calib (CPU) into the global config; vllm fork's Worker.load_model
+        # post-load hook (`maybe_run_post_load_fusion`) folds s_K / s_V into
+        # qkv_proj / o_proj weights once per worker. Each layer's runtime
+        # method is set to "pertoken" by attach_kv_quant_to_layer.
         assert args.calib_path, "--calib_path required for smoothkv_fused"
-        visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-        cfg_path = f"/tmp/kivi_active_{visible}.json"
-        cfg = {"method": "smoothkv_fused",
-               "calib_path": os.path.abspath(args.calib_path),
-               "group_size": args.group_size,
-               "bits": args.bits}
-        with open(cfg_path, "w") as f:
-            json.dump(cfg, f)
-        print(f"  [smoothkv_fused] wrote {cfg_path}: {cfg}")
+        configure_kv_quant("smoothkv_fused", group_size=args.group_size,
+                           bits=args.bits, calib_path=args.calib_path)
     elif args.model == "kivi":
         configure_kv_quant("kivi2", group_size=32)
 
