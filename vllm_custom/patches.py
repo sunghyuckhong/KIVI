@@ -1,31 +1,44 @@
 """
-Monkey-patch helpers that insert fake quantization into vLLM's
-Qwen3Attention, Qwen2Attention, and Exaone4Attention forwards.
+Attribute-based KV-quant dispatch for vLLM Attention forwards.
 
-Approach: replace `forward` with a version that applies quant→dequant on K
-and V (and optionally Q) after qk-norm + RoPE but before the paged attention
-op. The K and V that go into vLLM's KV cache are the dequantized versions,
-simulating lossy storage while keeping the cache in FP16.
+Approach: install ONE unified forward on every supported Attention class. The
+forward reads a class-level attribute `_kv_quant_method` and dispatches via
+`if/elif` to bf16 / fp8 / pertoken / smoothkv / kivi2. torch.compile sees the
+attribute as a Python constant at trace time, specializes on its value, and
+emits a graph that contains ONLY the chosen branch's quant kernels — so
+verify_compiled_graph.py still works without changes.
 
-Per-architecture differences (handled via runtime attribute probes):
-  - Qwen3 / Exaone4 have qk-norm pre-RoPE; Qwen2 does not.
-  - Exaone4 hybrid configs skip RoPE on full-attention layers (NoPE).
-    The patched forward checks `apply_rope_all_layers` and `sliding_window`
-    on the attention instance, matching the model's own forward logic.
+Why not per-method monkey-patch (the previous design):
+  - Hard to debug: the active forward depends on import/load order.
+  - Race conditions in the compile-cache wipe sentinel — when N parallel
+    workers all install_*(), only one wipes; others can hit a stale
+    compiled graph and silently run the unpatched bf16 forward (observed
+    on smk-RAW pass1 — verify-graph FAIL).
+  - Five near-identical forward bodies that drift out of sync.
 
-Only one method can be active per process (the patch is global). Call
-`install_<method>(...)` once before creating the vLLM LLM.
+This design:
+  - Single forward, branches in plain `if/elif`. One compiled graph per
+    (model, _kv_quant_method, group_size, bits) — dynamo specializes
+    naturally on the attribute value.
+  - Class attributes are set BEFORE LLM(...) is constructed, so every
+    instance picks up the same value. Switching methods is a one-shot
+    attribute set + cls.forward replacement.
 
 Usage:
-    from vllm_custom.patches import install_fp8, install_pertoken_int4, install_smoothkv
-    install_fp8(group_size=128)
+    from vllm_custom.patches import (
+        configure_kv_quant,            # primary API
+        install_fp8, install_pertoken_int4, install_smoothkv, install_kivi2,  # back-compat
+    )
+    configure_kv_quant("smoothkv", group_size=128, bits=4,
+                       calib_path="logs/calib/smoothkv_qwen3-8b_..._halfpair.pt")
     # then: LLM(model="Qwen/Qwen3-8B", ...)
-    #   or: LLM(model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", ...)
-    #   or: LLM(model="LGAI-EXAONE/EXAONE-4.5-33B", ...)
 
-vLLM 0.8+ note: these Attention.forward methods take only (positions,
-hidden_states) — kv_cache and attn_metadata are accessed via thread-locals
-inside self.attn.
+Per-architecture differences (handled via runtime attribute probes):
+  - Qwen3 / Exaone4 have qk-norm pre-RoPE; Qwen2/Llama/Mistral don't.
+  - Exaone4 hybrid configs skip RoPE on full-attention layers (NoPE).
+
+vLLM 0.8+ note: Attention.forward takes only (positions, hidden_states) —
+kv_cache and attn_metadata flow through thread-locals inside self.attn.
 """
 import torch
 
@@ -44,10 +57,9 @@ from vllm_custom.fake_quant_utils import (
 )
 
 
-# Attention classes supported by install_*(). To add a new model, import its
-# Attention class above and append it here. The patched forward handles
-# qk-norm and RoPE policy at runtime via attribute probes (`_apply_qk_norm`,
-# `_apply_rope_if_needed`), so the same forward works for every class.
+# Attention classes covered. To add a new model, import its Attention class
+# above and append it here. The unified forward handles qk-norm and RoPE
+# policy at runtime via `_apply_qk_norm`/`_apply_rope_if_needed`.
 _ATTN_CLASSES = (
     Qwen3Attention,
     Qwen2Attention,
@@ -59,6 +71,81 @@ _ATTN_CLASSES = (
 _ORIG_FORWARD: dict = {}
 _ORIG_INIT: dict = {}
 
+# Registered by configure_kv_quant(method="smoothkv") so the post-load hook
+# can pre-move calib scales to GPU before cudagraph capture begins.
+_POSTLOAD_HOOKS: list = []
+
+# SmoothKV state — module-level so the unified forward can reach it without
+# closure capture.
+_SMOOTHKV_S_K_CPU = None       # (num_layers, num_kv_heads, head_dim) bf16 on CPU
+_SMOOTHKV_S_V_CPU = None
+_SMOOTHKV_SCALES_GPU: dict = {}  # layer_idx -> (sk_gpu, sv_gpu) — filled by warmup hook
+
+
+# ---------------------------------------------------------------------------
+# Unified forward — single function, branches on `self._kv_quant_method`
+# ---------------------------------------------------------------------------
+
+def kv_quant_unified_forward(self, positions, hidden_states):
+    """Single forward for all attention classes. Branches on _kv_quant_method.
+
+    torch.compile specialization:
+      - `_kv_quant_method` is a Python str class attribute, treated as constant
+        at trace time. dynamo emits a guard on its value and the compiled
+        graph contains ONLY the matching branch.
+      - `_kv_quant_group_size` and `_kv_quant_bits` are int attributes, also
+        constant-folded.
+
+    verify_compiled_graph then sees:
+      bf16     → no quant kernels (FORBIDDEN check passes)
+      fp8      → fake_quantize_dequantize_fp8
+      pertoken → quant_and_pack_vcache + unpack_and_dequant_vcache
+      smoothkv → quant_and_pack_vcache (after K is divided by s_K)
+      kivi2    → quant_and_pack_vcache (bits=2)
+    """
+    qkv, _ = self.qkv_proj(hidden_states)
+    q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+    q, k = _apply_qk_norm(self, q, k)
+    q, k = _apply_rope_if_needed(self, positions, q, k)
+
+    method = getattr(self, "_kv_quant_method", "bf16")
+    gs = getattr(self, "_kv_quant_group_size", 128)
+    bits = getattr(self, "_kv_quant_bits", 4)
+
+    if method == "bf16" or method == "fp16":
+        pass  # baseline — no quant
+    elif method == "fp8":
+        k = fake_quantize_fp8(k, self.num_kv_heads, self.head_dim, gs)
+        v = fake_quantize_fp8(v, self.num_kv_heads, self.head_dim, gs)
+    elif method == "pertoken":
+        k = fake_quantize_k_pertoken(k, self.num_kv_heads, self.head_dim, gs, bits=bits)
+        v = fake_quantize_v_pertoken(v, self.num_kv_heads, self.head_dim, gs, bits=bits)
+    elif method == "smoothkv":
+        sk, sv = _get_scales(self)
+        sk_flat = sk.reshape(-1)
+        sv_flat = sv.reshape(-1)
+        k_s = k / sk_flat
+        k_s = fake_quantize_k_pertoken(k_s, self.num_kv_heads, self.head_dim, gs, bits=bits)
+        k = k_s * sk_flat
+        v_s = v / sv_flat
+        v_s = fake_quantize_v_pertoken(v_s, self.num_kv_heads, self.head_dim, gs, bits=bits)
+        v = v_s * sv_flat
+    elif method == "kivi2":
+        # KIVI-2: K per-channel int2, V per-token int2, R=128 FP16 residual
+        # (residual buffer is stateful — not faithfully simulated here, see comment).
+        k = fake_quantize_k_pertoken(k, self.num_kv_heads, self.head_dim, gs, bits=2)
+        v = fake_quantize_v_pertoken(v, self.num_kv_heads, self.head_dim, gs, bits=2)
+    else:
+        raise ValueError(f"Unknown _kv_quant_method: {method!r}")
+
+    attn_output = self.attn(q, k, v)
+    output, _ = self.o_proj(attn_output)
+    return output
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _ensure_original_saved():
     _wipe_compile_cache()
@@ -69,27 +156,17 @@ def _ensure_original_saved():
 
 
 def _wipe_compile_cache():
-    """Delete vLLM's torch.compile cache before any install_*() runs.
+    """Delete vLLM's torch.compile cache before any configure_kv_quant() runs.
 
-    The cache stores compiled forward bytecode keyed by model+dtype+config.
-    If a bf16 run populated the cache, a subsequent fp8/pertoken/smoothkv run
-    will load that cached compiled graph — which has the UNPATCHED forward
-    baked in — and silently skip the quant patch even though `cls.forward`
-    has been replaced. Wiping the cache forces a fresh compile that captures
-    the patched forward. Cost: ~2-3 min per run to rebuild.
-
-    Race-safe: parallel install_*() calls (e.g. wave of N quant cells) would
-    otherwise wipe the cache while siblings are mid-compile, deadlocking
-    everyone. We use an exclusive lockfile + per-launch sentinel so the
-    FIRST process wipes, the rest see the sentinel and skip.
+    Race-safe: parallel workers (e.g. wave of N quant cells) would otherwise
+    wipe the cache while siblings are mid-compile. Exclusive lockfile +
+    per-launch sentinel: FIRST process wipes, the rest skip.
     """
-    import os, shutil, fcntl, time
+    import os, shutil, fcntl
     cache_dir = os.path.expanduser("~/.cache/vllm/torch_compile_cache")
     lock_dir = os.path.expanduser("~/.cache/vllm")
     os.makedirs(lock_dir, exist_ok=True)
     lock_path = os.path.join(lock_dir, ".kivi_wipe.lock")
-    # Per-launch sentinel: cleared by the launcher before each sweep wave.
-    # Within a single launch, the FIRST install_*() wipes; the rest no-op.
     sentinel_path = os.path.join(lock_dir, ".kivi_wiped_this_launch")
     launch_id = os.environ.get("KIVI_LAUNCH_ID", "default")
 
@@ -120,14 +197,13 @@ def _wipe_compile_cache():
 
 
 def _install_postload_assertion():
-    """Patch Worker.load_model so that AFTER the model loads, we count attention
-    modules whose class is in _ATTN_CLASSES. If zero, the install_*() patch is a
-    silent no-op for this model — raise so the run fails loudly instead of
-    pretending to quantize while actually running bf16."""
+    """Patch Worker.load_model so AFTER load we count attention modules whose
+    class is in _ATTN_CLASSES. If zero, the patch is a silent no-op for this
+    model — fail loud."""
     try:
         from vllm.v1.worker.gpu_worker import Worker
     except ImportError:
-        return  # vLLM <0.19 — different worker layout; skip the check
+        return
     if getattr(Worker, "_kivi_postload_patched", False):
         return
     orig_load = Worker.load_model
@@ -141,14 +217,9 @@ def _install_postload_assertion():
             raise RuntimeError(
                 f"[vllm_custom.patches] FAIL-LOUD: 0 attention modules in the loaded "
                 f"model match the patched classes {names}. Quantization is a silent "
-                f"no-op. Add the model's attention class to _build_attn_classes() in "
-                f"vllm_custom/patches.py."
+                f"no-op. Add the model's attention class to _ATTN_CLASSES."
             )
         print(f"[vllm_custom.patches] post-load assertion: {n} attention modules patched")
-        # Run any registered post-load warmup hooks (smoothkv pre-moves calib
-        # scales to GPU here so the forward doesn't trigger a CPU→GPU memcpy
-        # during cudagraph stream capture, which causes
-        # cudaErrorStreamCaptureUnsupported).
         for hook in _POSTLOAD_HOOKS:
             hook(model)
         return ret
@@ -157,17 +228,9 @@ def _install_postload_assertion():
     Worker._kivi_postload_patched = True
 
 
-# Registered by install_smoothkv() so the worker can pre-move calib scales to
-# GPU before cudagraph capture begins.
-_POSTLOAD_HOOKS: list = []
-
-
 def _apply_qk_norm(self, q, k):
-    """Replicates Qwen3Attention's qk-norm block (pre-RoPE, per head_dim).
-
-    Qwen2Attention has no qk-norm — return q,k unchanged in that case so the
-    same forward function works for both architectures.
-    """
+    """Replicate qk-norm block (pre-RoPE, per head_dim).
+    Qwen3/Exaone4 have q_norm/k_norm; Qwen2/Llama/Mistral don't (return q,k as-is)."""
     if not hasattr(self, "q_norm"):
         return q, k
     q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
@@ -180,15 +243,8 @@ def _apply_qk_norm(self, q, k):
 
 
 def _apply_rope_if_needed(self, positions, q, k):
-    """Apply RoPE matching the model's per-layer policy.
-
-    Qwen3/Qwen2 always apply RoPE — `apply_rope_all_layers` and `sliding_window`
-    attrs don't exist there, so the default-True branch fires.
-
-    Exaone4 hybrid configs: full-attention layers have `sliding_window=None` and
-    `apply_rope_all_layers=False` → skip RoPE entirely (NoPE on full-attn).
-    Sliding-attention layers have `sliding_window` set → apply RoPE.
-    """
+    """Apply RoPE per the model's policy. Qwen3/Qwen2 always apply RoPE;
+    Exaone4 hybrid configs skip RoPE on full-attention layers (NoPE)."""
     apply_all = getattr(self, "apply_rope_all_layers", True)
     sliding = getattr(self, "sliding_window", True)
     if apply_all or sliding:
@@ -196,19 +252,9 @@ def _apply_rope_if_needed(self, positions, q, k):
     return q, k
 
 
-def _assign_forward(fn):
-    """Install the same forward on every attention class we cover."""
-    for cls in _ATTN_CLASSES:
-        cls.forward = fn
-
-
 def _install_layer_idx_hook():
-    """Patch Qwen3/Qwen2 Attention.__init__ to stash `self._kivi_layer_idx`.
-
-    vLLM passes `prefix="model.layers.N.self_attn"` to __init__ but doesn't
-    store it on the instance. SmoothKV needs per-layer scales, so we hook
-    __init__ to save the parsed layer index before the LLM builds layers.
-    """
+    """Patch Attention.__init__ to stash `self._kivi_layer_idx` so SmoothKV
+    can index per-layer calib scales."""
     for cls in _ATTN_CLASSES:
         if cls in _ORIG_INIT:
             continue
@@ -233,87 +279,52 @@ def _install_layer_idx_hook():
         cls.__init__ = make_patched(orig)
 
 
-def restore():
-    """Undo any patch applied by install_*."""
-    for cls, fwd in list(_ORIG_FORWARD.items()):
-        cls.forward = fwd
-    for cls, init in list(_ORIG_INIT.items()):
-        cls.__init__ = init
-    _ORIG_INIT.clear()
+def _get_scales(self):
+    """SmoothKV: look up per-layer (s_K, s_V) GPU tensors pre-warmed by the
+    post-load hook. Called from the unified forward when method == 'smoothkv'."""
+    layer_idx = getattr(self, "_kivi_layer_idx", None)
+    if layer_idx is None:
+        raise RuntimeError(
+            "SmoothKV: layer index unset. _install_layer_idx_hook() must run "
+            "before model construction — call configure_kv_quant() before LLM(...)."
+        )
+    sk_sv = _SMOOTHKV_SCALES_GPU.get(layer_idx)
+    if sk_sv is None:
+        raise RuntimeError(
+            f"SmoothKV: scales for layer {layer_idx} not pre-warmed. "
+            f"Worker.load_model post-load hook didn't run, or this layer's "
+            f"_kivi_layer_idx wasn't set."
+        )
+    return sk_sv
 
 
-def install_fp8(group_size: int = 128):
-    """Fake-quant K and V at FP8 (symmetric, e4m3fn)."""
-    _ensure_original_saved()
+def _setup_smoothkv_calib(calib_path: str, dtype: torch.dtype = torch.bfloat16):
+    """Load SmoothKV calib (CPU-side) and register the post-load warmup hook.
 
-    def fp8_forward(self, positions, hidden_states):
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = _apply_qk_norm(self, q, k)
-        q, k = _apply_rope_if_needed(self, positions, q, k)
-        k = fake_quantize_fp8(k, self.num_kv_heads, self.head_dim, group_size)
-        v = fake_quantize_fp8(v, self.num_kv_heads, self.head_dim, group_size)
-        attn_output = self.attn(q, k, v)
-        output, _ = self.o_proj(attn_output)
-        return output
-
-    _assign_forward(fp8_forward)
-
-
-def install_pertoken_int4(group_size: int = 128):
-    """Fake-quant K and V at INT4 per-token (KIVI pertoken scheme, residual=0)."""
-    _ensure_original_saved()
-
-    def pertoken_forward(self, positions, hidden_states):
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = _apply_qk_norm(self, q, k)
-        q, k = _apply_rope_if_needed(self, positions, q, k)
-        k = fake_quantize_k_pertoken(k, self.num_kv_heads, self.head_dim, group_size, bits=4)
-        v = fake_quantize_v_pertoken(v, self.num_kv_heads, self.head_dim, group_size, bits=4)
-        attn_output = self.attn(q, k, v)
-        output, _ = self.o_proj(attn_output)
-        return output
-
-    _assign_forward(pertoken_forward)
-
-
-def install_smoothkv(calib_path: str, group_size: int = 128, bits: int = 4,
-                     dtype: torch.dtype = torch.bfloat16):
-    """Fake-quant K and V with SmoothKV: scale K by s_K^-1, scale V by s_V, quant, invert.
-
-    calib_path: path to the .pt file produced by scripts/make_*_variants.py.
-    dtype: smoothing-factor dtype — should match the model's runtime dtype.
-           Most recent models (Qwen3, Llama-3, Mistral-7B) are bfloat16; Llama-2
-           is float16. Override this default if running with a non-bf16 model.
-    """
-    _ensure_original_saved()
-    _install_layer_idx_hook()
-
+    Keep scales on CPU here. Calling .cuda() in the main process initializes
+    CUDA, which forces vLLM to use multiprocess spawn for its workers — spawn
+    re-imports modules in the worker, so the worker's Attention class never
+    picks up our forward and quant silently no-ops. We lazy-move to CUDA in
+    the post-load hook (which runs INSIDE the worker)."""
+    global _SMOOTHKV_S_K_CPU, _SMOOTHKV_S_V_CPU, _SMOOTHKV_SCALES_GPU
     calib = torch.load(calib_path, weights_only=True)
-    # Keep scales on CPU here. Calling .cuda() in the main process before
-    # LLM(...) initializes CUDA, which forces vLLM to use multiprocess spawn
-    # for its workers. Spawn re-imports modules in the worker → the worker's
-    # LlamaAttention class never picks up the smoothkv_forward we install
-    # below → quant silently no-ops. We lazy-move to CUDA inside the forward
-    # (cached after first call) so CUDA is only initialized in the worker.
-    s_K_all_cpu = calib["s_K"].to(dtype)  # (num_layers, num_kv_heads, head_dim)
-    s_V_all_cpu = calib["s_V"].to(dtype)
-    _scales_gpu = {}  # layer_idx -> (sk_gpu, sv_gpu), filled by post-load hook
+    _SMOOTHKV_S_K_CPU = calib["s_K"].to(dtype)  # (num_layers, num_kv_heads, head_dim)
+    _SMOOTHKV_S_V_CPU = calib["s_V"].to(dtype)
+    _SMOOTHKV_SCALES_GPU = {}
 
-    # Pre-warm scales onto each layer's GPU during Worker.load_model — BEFORE
-    # cudagraph capture begins. CUDA→GPU memcpy inside the captured forward
-    # raises cudaErrorStreamCaptureUnsupported, so we must move ahead of time.
-    # For TP>1, calib s_K has full_num_kv_heads but each worker only sees a
-    # slice → we shard along the kv_heads dim per tp_rank so the scale shape
-    # matches the per-worker key tensor.
     def _warmup_scales(model):
+        """Pre-move per-layer scales to each worker's GPU before cudagraph
+        capture. CUDA→GPU memcpy inside captured graphs raises
+        cudaErrorStreamCaptureUnsupported, so we must do it ahead of time.
+
+        TP-aware: calib s_K has full_num_kv_heads but each worker only sees a
+        slice → shard along kv_heads dim per tp_rank."""
         try:
             from vllm.distributed import get_tensor_model_parallel_rank
             tp_rank = get_tensor_model_parallel_rank()
         except Exception:
             tp_rank = 0
-        full_kv_heads = s_K_all_cpu.shape[1]
+        full_kv_heads = _SMOOTHKV_S_K_CPU.shape[1]
         for m in model.modules():
             li = getattr(m, "_kivi_layer_idx", None)
             if li is None:
@@ -324,86 +335,95 @@ def install_smoothkv(calib_path: str, group_size: int = 128, bits: int = 4,
                 continue
             per_worker_kv = getattr(m, "num_kv_heads", full_kv_heads)
             if per_worker_kv == full_kv_heads:
-                sk = s_K_all_cpu[li].to(dev)
-                sv = s_V_all_cpu[li].to(dev)
+                sk = _SMOOTHKV_S_K_CPU[li].to(dev)
+                sv = _SMOOTHKV_S_V_CPU[li].to(dev)
             else:
                 lo = tp_rank * per_worker_kv
                 hi = lo + per_worker_kv
-                sk = s_K_all_cpu[li, lo:hi].to(dev)
-                sv = s_V_all_cpu[li, lo:hi].to(dev)
-            _scales_gpu[li] = (sk, sv)
-        print(f"[vllm_custom.patches] smoothkv warmup: pre-moved {len(_scales_gpu)} "
+                sk = _SMOOTHKV_S_K_CPU[li, lo:hi].to(dev)
+                sv = _SMOOTHKV_S_V_CPU[li, lo:hi].to(dev)
+            _SMOOTHKV_SCALES_GPU[li] = (sk, sv)
+        print(f"[vllm_custom.patches] smoothkv warmup: pre-moved {len(_SMOOTHKV_SCALES_GPU)} "
               f"layer scales to GPU (cudagraph-safe, tp_rank={tp_rank}, "
-              f"per_worker_kv={per_worker_kv if _scales_gpu else '?'})")
+              f"per_worker_kv={per_worker_kv if _SMOOTHKV_SCALES_GPU else '?'})")
     _POSTLOAD_HOOKS.append(_warmup_scales)
 
-    def _get_scales(self):
-        """Layer idx stashed by the __init__ hook; scales pre-moved by warmup."""
-        layer_idx = getattr(self, "_kivi_layer_idx", None)
-        if layer_idx is None:
-            raise RuntimeError(
-                "SmoothKV: layer index unset. The __init__ hook must run before "
-                "model construction — call install_smoothkv() before LLM(...)."
-            )
-        sk_sv = _scales_gpu.get(layer_idx)
-        if sk_sv is None:
-            raise RuntimeError(
-                f"SmoothKV: scales for layer {layer_idx} not pre-warmed. "
-                f"Worker.load_model post-load hook didn't run, or this layer's "
-                f"_kivi_layer_idx wasn't set."
-            )
-        return sk_sv
 
-    def smoothkv_forward(self, positions, hidden_states):
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = _apply_qk_norm(self, q, k)
-        q, k = _apply_rope_if_needed(self, positions, q, k)
+def restore():
+    """Undo all patches applied by configure_kv_quant()."""
+    for cls, fwd in list(_ORIG_FORWARD.items()):
+        cls.forward = fwd
+    for cls, init in list(_ORIG_INIT.items()):
+        cls.__init__ = init
+    _ORIG_INIT.clear()
+    for cls in _ATTN_CLASSES:
+        for attr in ("_kv_quant_method", "_kv_quant_group_size", "_kv_quant_bits"):
+            if hasattr(cls, attr):
+                delattr(cls, attr)
 
-        sk, sv = _get_scales(self)  # (num_kv_heads, head_dim) on K's device
-        sk_flat = sk.reshape(-1)
-        sv_flat = sv.reshape(-1)
 
-        # Same SmoothKV semantics as the Llama path (models/llama_smoothkv.py +
-        # quant/smoothkv_quant.py). K: k/s_K → quant → ×s_K; V: v/s_V → quant → ×s_V.
-        kv_heads = self.num_kv_heads
-        head_dim = self.head_dim
+# ---------------------------------------------------------------------------
+# Primary API: configure_kv_quant
+# ---------------------------------------------------------------------------
 
-        k_s = k / sk_flat
-        k_s = fake_quantize_k_pertoken(k_s, kv_heads, head_dim, group_size, bits=bits)
-        k = k_s * sk_flat
+def configure_kv_quant(method: str, group_size: int = 128, bits: int = 4,
+                       calib_path: str = None, dtype: torch.dtype = torch.bfloat16):
+    """Set up KV-cache quantization on every supported Attention class.
 
-        v_s = v / sv_flat
-        v_s = fake_quantize_v_pertoken(v_s, kv_heads, head_dim, group_size, bits=bits)
-        v = v_s * sv_flat
+    Args:
+        method:      "bf16" | "fp16" | "fp8" | "pertoken" | "smoothkv" | "kivi2"
+        group_size:  per-channel group size (default 128)
+        bits:        4 for pertoken/smoothkv, 2 for kivi2 (auto-set if method=="kivi2")
+        calib_path:  required for method=="smoothkv"; ignored otherwise
+        dtype:       smoothkv calib scale dtype (bf16 for Qwen3/Llama-3, fp16 for Llama-2)
 
-        attn_output = self.attn(q, k, v)
-        output, _ = self.o_proj(attn_output)
-        return output
+    After this returns, every Attention instance constructed afterward will
+    have the unified forward. The class attributes `_kv_quant_method`,
+    `_kv_quant_group_size`, `_kv_quant_bits` are read at runtime; torch.compile
+    specializes on their values and the FX graph contains ONLY the matching
+    branch's quant kernels.
+    """
+    if method not in ("bf16", "fp16", "fp8", "pertoken", "smoothkv", "kivi2"):
+        raise ValueError(f"Unknown method {method!r}; expected bf16/fp16/fp8/pertoken/smoothkv/kivi2")
+    if method == "smoothkv" and not calib_path:
+        raise ValueError("method='smoothkv' requires calib_path")
+    if method == "kivi2":
+        bits = 2  # KIVI-2 is hardcoded int2
 
-    _assign_forward(smoothkv_forward)
+    _ensure_original_saved()
+    _install_layer_idx_hook()
 
+    # Class-level config — torch.compile constant-folds these
+    for cls in _ATTN_CLASSES:
+        cls._kv_quant_method = method
+        cls._kv_quant_group_size = group_size
+        cls._kv_quant_bits = bits
+        cls.forward = kv_quant_unified_forward
+
+    if method == "smoothkv":
+        _setup_smoothkv_calib(calib_path, dtype)
+
+    print(f"[vllm_custom.patches] configure_kv_quant: method={method} "
+          f"group_size={group_size} bits={bits}"
+          + (f" calib_path={calib_path}" if calib_path else ""))
+
+
+# ---------------------------------------------------------------------------
+# Backward-compat thin wrappers (so existing run_eval_vllm.py / adaptive_pass2.py
+# don't need to change).
+# ---------------------------------------------------------------------------
+
+def install_fp8(group_size: int = 128):
+    configure_kv_quant("fp8", group_size=group_size)
+
+def install_pertoken_int4(group_size: int = 128):
+    configure_kv_quant("pertoken", group_size=group_size, bits=4)
+
+def install_smoothkv(calib_path: str, group_size: int = 128, bits: int = 4,
+                     dtype: torch.dtype = torch.bfloat16):
+    configure_kv_quant("smoothkv", group_size=group_size, bits=bits,
+                       calib_path=calib_path, dtype=dtype)
 
 def install_kivi2(group_size: int = 32, residual: int = 128):
-    """Fake-quant for KIVI-2 (K per-channel INT2, V per-token INT2, R=128 FP16 residual).
-
-    CAVEAT: the residual buffer is stateful across decode steps. In vLLM we can't
-    retroactively re-quantize tokens after they're cached. The simplified scheme
-    used here applies quant→dequant to K/V at every step without distinguishing
-    'in-residual' vs 'out-of-residual' tokens. Lossy vs HFLM reference by roughly
-    the residual-buffer contribution.
-    """
-    _ensure_original_saved()
-
-    def kivi2_forward(self, positions, hidden_states):
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = _apply_qk_norm(self, q, k)
-        q, k = _apply_rope_if_needed(self, positions, q, k)
-        k = fake_quantize_k_pertoken(k, self.num_kv_heads, self.head_dim, group_size, bits=2)
-        v = fake_quantize_v_pertoken(v, self.num_kv_heads, self.head_dim, group_size, bits=2)
-        attn_output = self.attn(q, k, v)
-        output, _ = self.o_proj(attn_output)
-        return output
-
-    _assign_forward(kivi2_forward)
+    """KIVI-2 (residual buffer not faithfully simulated; see KIVI paper §3.3)."""
+    configure_kv_quant("kivi2", group_size=group_size)
