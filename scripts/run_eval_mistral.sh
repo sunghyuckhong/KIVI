@@ -9,7 +9,7 @@
 #   bash scripts/run_eval_mistral.sh \
 #       [--model mistralai/Mistral-7B-Instruct-v0.2] \
 #       --variant bf16|fp8|pertoken|smkv \
-#       --task gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot_32k \
+#       --task gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot \
 #       [--ns 512] [--alpha 1.0] [--beta 1.0] \
 #       [--gpus 0]
 set -euo pipefail

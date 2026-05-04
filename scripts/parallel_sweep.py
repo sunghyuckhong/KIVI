@@ -12,7 +12,7 @@ Usage (from Makefile -- not normally called by hand):
         --runner scripts/run_eval_qwen3.sh \\
         --runner_args --size 32b \\
         --variants bf16 fp8 pertoken smkv \\
-        --tasks gsm8k_cot minerva_math500 gpqa_main_cot_n_shot_32k \\
+        --tasks gsm8k_cot minerva_math500 gpqa_main_cot_n_shot \\
         --tp 2 \\
         [--gpus 0,1,2,3]   # default: auto-detect idle (< 2GB used)
 

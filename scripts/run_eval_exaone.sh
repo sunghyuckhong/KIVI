@@ -14,7 +14,7 @@
 # Usage:
 #   bash scripts/run_eval_exaone.sh \
 #       --variant bf16|fp8|pertoken|smkv \
-#       --task gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot_32k \
+#       --task gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot \
 #       [--ns 512] [--alpha 1.0] [--beta 1.0] \
 #       [--gpus 0,1]                        # TP=2 pair (33B doesn't fit on 80GB single)
 #
@@ -40,14 +40,14 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -z "$VARIANT" ] || [ -z "$TASK" ] && {
-  /usr/bin/echo "Required: --variant {bf16|fp8|pertoken|smkv} --task {gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot_32k}"
+  /usr/bin/echo "Required: --variant {bf16|fp8|pertoken|smkv} --task {gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot}"
   exit 1
 }
 
 case "$TASK" in
   gsm8k_cot|minerva_math500) PROMPT_BUDGET=1536 ;;
-  gpqa_main_cot_n_shot_32k)  PROMPT_BUDGET=3072 ;;
-  *) /usr/bin/echo "task must be gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot_32k"; exit 1 ;;
+  gpqa_main_cot_n_shot)  PROMPT_BUDGET=3072 ;;
+  *) /usr/bin/echo "task must be gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot"; exit 1 ;;
 esac
 
 MODEL_PATH=LGAI-EXAONE/EXAONE-4.5-33B

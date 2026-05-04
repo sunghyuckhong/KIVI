@@ -158,7 +158,10 @@ def main():
     from lm_eval import simple_evaluate, utils as lm_utils
     from lm_eval.models.vllm_causallms import VLLM
     from lm_eval.tasks import TaskManager
-    tm = TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks"))
+    # Stock lm-eval task registry — we use built-in task names
+    # (gsm8k_cot, minerva_math500, gpqa_main_cot_n_shot) and override
+    # gen_kwargs at runtime via --max_gen_toks. No custom yamls needed.
+    tm = TaskManager()
 
     print(f"\n{'='*60}")
     print(f"  [vLLM] model={args.kv_quant_method}  task={args.task}  path={args.model}")

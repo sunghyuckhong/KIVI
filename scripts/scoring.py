@@ -11,7 +11,7 @@ lm-eval's own metric naming so the downstream tables can stay schema-stable.
 Available scorers (looked up via ``SCORERS[task_name]``):
   - ``minerva_math500``           → math_verify (sympy boxed-aware)
   - ``gsm8k_cot`` / ``gsm8k_32k`` → strict + flexible exact-match on numbers
-  - ``gpqa_main_cot_n_shot_32k``  → flexible-extract on (A)/(B)/(C)/(D)
+  - ``gpqa_main_cot_n_shot``  → flexible-extract on (A)/(B)/(C)/(D)
 """
 import re
 
@@ -121,5 +121,5 @@ SCORERS = {
     "minerva_math500": score_minerva_math500,
     "gsm8k_32k": score_gsm8k,
     "gsm8k_cot": score_gsm8k,
-    "gpqa_main_cot_n_shot_32k": score_gpqa,
+    "gpqa_main_cot_n_shot": score_gpqa,
 }

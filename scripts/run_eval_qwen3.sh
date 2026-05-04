@@ -9,7 +9,7 @@
 #   bash scripts/run_eval_qwen3.sh \
 #       --size 8b|32b \
 #       --variant bf16|fp8|pertoken|smkv|smkv_per_head \
-#       --task gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot_32k \
+#       --task gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot \
 #       [--ns 512]                     # SmoothKV calib sample count
 #       [--alpha 1.0] [--beta 1.0]     # SmoothKV α/β
 #       [--no_chat_calib]              # skip chat template at calibration (default: chat-calib ON)
@@ -60,7 +60,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -z "$SIZE" ] || [ -z "$VARIANT" ] || [ -z "$TASK" ] && {
-  /usr/bin/echo "Required: --size {8b|32b|30b-a3b} --variant {bf16|fp8|pertoken|smkv|smkv_per_head} --task {gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot_32k}"
+  /usr/bin/echo "Required: --size {8b|32b|30b-a3b} --variant {bf16|fp8|pertoken|smkv|smkv_per_head} --task {gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot}"
   exit 1
 }
 
@@ -70,8 +70,8 @@ MODEL_TAG="qwen3-${SIZE}"
 
 case "$TASK" in
   gsm8k_cot|minerva_math500) PROMPT_BUDGET=1536 ;;
-  gpqa_main_cot_n_shot_32k)  PROMPT_BUDGET=3072 ;;
-  *) /usr/bin/echo "task must be gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot_32k"; exit 1 ;;
+  gpqa_main_cot_n_shot)  PROMPT_BUDGET=3072 ;;
+  *) /usr/bin/echo "task must be gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot"; exit 1 ;;
 esac
 
 # TP based on size (8B → TP=1, 32B/30B-A3B → TP=2). Default max_num_seqs.

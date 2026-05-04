@@ -8,7 +8,7 @@
 #   bash scripts/run_eval_llama.sh \
 #       --model meta-llama/Meta-Llama-3-8B-Instruct \
 #       --variant bf16|fp8|pertoken|smkv \
-#       --task gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot_32k \
+#       --task gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot \
 #       [--ns 512] [--alpha 1.0] [--beta 1.0] \
 #       [--gpus 0]
 #
@@ -34,7 +34,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -z "$MODEL_PATH" ] || [ -z "$VARIANT" ] || [ -z "$TASK" ] && {
-  /usr/bin/echo "Required: --model HF_PATH --variant {bf16|fp8|pertoken|smkv} --task {gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot_32k}"
+  /usr/bin/echo "Required: --model HF_PATH --variant {bf16|fp8|pertoken|smkv} --task {gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot}"
   exit 1
 }
 
@@ -43,7 +43,7 @@ MODEL_TAG=$(/usr/bin/echo "${MODEL_PATH,,}" | /usr/bin/tr '/' '\n' | /usr/bin/ta
 
 case "$TASK" in
   gsm8k_cot|minerva_math500) PROMPT_BUDGET=1536 ;;
-  gpqa_main_cot_n_shot_32k)  PROMPT_BUDGET=3072 ;;
+  gpqa_main_cot_n_shot)  PROMPT_BUDGET=3072 ;;
   *) /usr/bin/echo "task invalid"; exit 1 ;;
 esac
 

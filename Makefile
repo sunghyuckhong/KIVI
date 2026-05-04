@@ -56,7 +56,7 @@ export PY
 
 # --- Defaults (override on command line or via env) --------------------------
 VARIANTS       ?= bf16 fp8 pertoken smkv
-TASKS          ?= gsm8k_cot minerva_math500 gpqa_main_cot_n_shot_32k
+TASKS          ?= gsm8k_cot minerva_math500 gpqa_main_cot_n_shot
 NS             ?= 512
 ALPHA          ?= 1.0
 BETA           ?= 1.0

@@ -28,7 +28,7 @@ two-pass adaptive eval with a graph-verification trust gate at each pass.
 |------|--------|:--------:|------------------|
 | **gsm8k_cot** | Grade-school math | 2638 | `exact_match,flexible-extract` (lm-eval flex regex) |
 | **minerva_math500** | Competition math | 500 | `math_verify,none` (sympy boxed-aware) |
-| **gpqa_main_cot_n_shot_32k** | Graduate Q&A | 1170 | `exact_match,flexible-extract` |
+| **gpqa_main_cot_n_shot** | Graduate Q&A | 1170 | `exact_match,flexible-extract` |
 
 ## Models
 
@@ -152,7 +152,7 @@ All `make run-*` targets read these variables. Override on the command line.
 |----------|---------|-------------|
 | `GPUS` | `auto` | `auto` = scan idle (memory < 2GB), chunk by `--tp`. Or comma-separated explicit pool: `0,1,2,3`. `0,1` for TP=2 = single sequential stream. |
 | `VARIANTS` | `bf16 fp8 pertoken smkv` | Methods to sweep. |
-| `TASKS` | `gsm8k_cot minerva_math500 gpqa_main_cot_n_shot_32k` | Tasks to sweep. |
+| `TASKS` | `gsm8k_cot minerva_math500 gpqa_main_cot_n_shot` | Tasks to sweep. |
 | `NS` | `512` | SmoothKV calibration sample count. |
 | `ALPHA` | `1.0` | SmoothQuant α (K-side migration strength). |
 | `BETA` | `1.0` | SmoothQuant β (V-side power). |
@@ -194,7 +194,7 @@ Output during a run:
 ```
 [parallel] auto-detected idle GPUs (< 2000MB): [0, 1, 2, 3, 4, 5, 6, 7]
 [parallel] 4 stream(s) × 2 GPU(s): [0,1], [2,3], [4,5], [6,7]
-[parallel] 12 cells: variants=['bf16', 'fp8', 'pertoken', 'smkv'] × tasks=['gsm8k_cot', 'minerva_math500', 'gpqa_main_cot_n_shot_32k']
+[parallel] 12 cells: variants=['bf16', 'fp8', 'pertoken', 'smkv'] × tasks=['gsm8k_cot', 'minerva_math500', 'gpqa_main_cot_n_shot']
 [parallel] START  bf16       gsm8k_cot                          gpu=[0,1]  → logs/run_out/parallel_bf16_gsm8k_cot_g0_1.log
 ...
 [parallel] DONE   bf16       gsm8k_cot                          gpu=[0,1]  ✅ PASS  1842s  (1/12 cells; elapsed 1842s)

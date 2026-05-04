@@ -14,3 +14,8 @@
 lm-eval>=0.4.0
 math-verify>=0.5.0
 ray>=2.50.0
+# lm_eval/tasks/minerva_math/utils.py asserts version("antlr4-python3-runtime")
+# starts with "4.11" at module load. latex2sympy2_extended (transitive dep
+# of math-verify) wants >=4.13 but actually works with 4.11; pin to satisfy
+# the lm-eval assertion.
+antlr4-python3-runtime~=4.11.0
