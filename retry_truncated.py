@@ -48,9 +48,11 @@ def parse_args():
                    help="Skip vLLM generation; load this merged_samples file and rescore it. "
                         "Useful when only the scoring step changed.")
     # vLLM model spec (only required when generating)
-    p.add_argument("--model_path", default="Qwen/Qwen3-8B")
-    p.add_argument("--model", choices=["bf16", "fp16", "fp8", "pertoken", "smoothkv",
-                                        "smoothkv_fused"], default="bf16")
+    p.add_argument("--model", default="Qwen/Qwen3-8B",
+                   help="HF model path or hub id (e.g. Qwen/Qwen3-8B)")
+    p.add_argument("--kv_quant_method", "--kvq", dest="kv_quant_method",
+                   choices=["bf16", "fp16", "fp8", "pertoken", "smoothkv", "smoothkv_fused"],
+                   default="bf16")
     p.add_argument("--orig_mg", type=int, default=4096,
                    help="max_gen_toks used in first pass (truncation threshold)")
     p.add_argument("--retry_mg", type=int, default=32768,
@@ -70,24 +72,24 @@ def parse_args():
 def build_kv_quant_config(args):
     """Return a KVCacheQuantConfig for the requested method, or None for
     bf16/fp16. Pass to LLM(...) via kv_cache_quant_config=cfg."""
-    if args.model in ("bf16", "fp16"):
+    if args.kv_quant_method in ("bf16", "fp16"):
         return None
     from vllm.config import KVCacheQuantConfig
-    if args.model == "fp8":
+    if args.kv_quant_method == "fp8":
         return KVCacheQuantConfig(method="fp8", group_size=args.group_size)
-    if args.model == "pertoken":
+    if args.kv_quant_method == "pertoken":
         return KVCacheQuantConfig(method="pertoken", group_size=args.group_size,
                                   bits=args.bits)
-    if args.model == "smoothkv":
+    if args.kv_quant_method == "smoothkv":
         assert args.calib_path, "--calib_path required for smoothkv"
         return KVCacheQuantConfig(method="smoothkv", group_size=args.group_size,
                                   bits=args.bits, calib_path=args.calib_path)
-    if args.model == "smoothkv_fused":
+    if args.kv_quant_method == "smoothkv_fused":
         assert args.calib_path, "--calib_path required for smoothkv_fused"
         return KVCacheQuantConfig(method="smoothkv_fused",
                                   group_size=args.group_size, bits=args.bits,
                                   calib_path=args.calib_path)
-    raise ValueError(f"unknown --model {args.model}")
+    raise ValueError(f"unknown --model {args.kv_quant_method}")
 
 
 # ---------- truncation detection ----------
@@ -140,10 +142,10 @@ def generate_retries(args, items, truncated_idx, kv_quant_cfg=None):
     elif os.environ.get("NO_ENFORCE_EAGER"):
         enforce_eager = False
     else:
-        enforce_eager = is_old_vllm and args.model not in ("bf16", "fp16")
+        enforce_eager = is_old_vllm and args.kv_quant_method not in ("bf16", "fp16")
 
     llm_kwargs = dict(
-        model=args.model_path,
+        model=args.model,
         dtype="auto",
         tensor_parallel_size=args.tp,
         gpu_memory_utilization=args.gpu_memory_utilization,
@@ -153,7 +155,7 @@ def generate_retries(args, items, truncated_idx, kv_quant_cfg=None):
     )
     if args.max_model_len is not None:
         llm_kwargs["max_model_len"] = args.max_model_len
-    if "EXAONE-4.5" in args.model_path:
+    if "EXAONE-4.5" in args.model:
         # Multimodal wrapper crashes mm-budget profiling without the (missing) video processor
         llm_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
     if kv_quant_cfg is not None:
@@ -331,7 +333,7 @@ def main():
         print(f"[retry] loaded {len(items)} items from {args.samples}  task={task_name}")
 
         from transformers import AutoTokenizer
-        tok = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
+        tok = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
         truncated_idx = find_truncated(items, args.orig_mg, tok)
         print(f"[retry] {len(truncated_idx)}/{len(items)} truncated at MG={args.orig_mg} "
               f"({len(truncated_idx)/len(items)*100:.1f}%)")
@@ -362,7 +364,7 @@ def main():
     # for every filter (the model didn't finish; flex regex luck shouldn't count).
     include_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks")
     from transformers import AutoTokenizer
-    tok = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
+    tok = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     per = score(merged, args.task, include_path, mg_cap=args.retry_mg, tokenizer=tok)
 
     final = {task_name: {}}

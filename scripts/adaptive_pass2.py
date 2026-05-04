@@ -47,8 +47,9 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--samples", required=True)
     p.add_argument("--task", required=True)
-    p.add_argument("--model_path", required=True)
-    p.add_argument("--model",
+    p.add_argument("--model", required=True,
+                   help="HF model path or hub id (e.g. Qwen/Qwen3-8B)")
+    p.add_argument("--kv_quant_method", "--kvq", dest="kv_quant_method",
                    choices=["bf16", "fp16", "fp8", "pertoken", "smoothkv", "smoothkv_fused"],
                    required=True)
     p.add_argument("--calib_path", default=None)
@@ -81,23 +82,23 @@ def build_kv_quant_config(args):
     FX-graph hash collisions."""
     _isolate_compile_cache()
 
-    if args.model in ("bf16", "fp16"):
+    if args.kv_quant_method in ("bf16", "fp16"):
         return None
-    if args.model == "fp8":
+    if args.kv_quant_method == "fp8":
         return KVCacheQuantConfig(method="fp8", group_size=args.group_size)
-    if args.model == "pertoken":
+    if args.kv_quant_method == "pertoken":
         return KVCacheQuantConfig(method="pertoken", group_size=args.group_size,
                                   bits=args.bits)
-    if args.model == "smoothkv":
+    if args.kv_quant_method == "smoothkv":
         assert args.calib_path
         return KVCacheQuantConfig(method="smoothkv", group_size=args.group_size,
                                   bits=args.bits, calib_path=args.calib_path)
-    if args.model == "smoothkv_fused":
+    if args.kv_quant_method == "smoothkv_fused":
         assert args.calib_path
         return KVCacheQuantConfig(method="smoothkv_fused",
                                   group_size=args.group_size, bits=args.bits,
                                   calib_path=args.calib_path)
-    raise ValueError(f"unknown --model {args.model}")
+    raise ValueError(f"unknown --model {args.kv_quant_method}")
 
 
 def extract_prompt(arguments):
@@ -235,7 +236,7 @@ def main():
     print(f"[pass2] loaded {len(items)} items for task={task_key}")
 
     from transformers import AutoTokenizer
-    tok = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=False)
+    tok = AutoTokenizer.from_pretrained(args.model, trust_remote_code=False)
 
     truncated_idx = find_truncated(items, args.pass1_mg, tok)
     print(f"[pass2] {len(truncated_idx)}/{len(items)} truncated at MG={args.pass1_mg} "
@@ -246,10 +247,10 @@ def main():
         from vllm import LLM, SamplingParams
 
         prompts = [extract_prompt(items[i]["arguments"]) for i in truncated_idx]
-        print(f"[pass2] launching vLLM (model={args.model}, MG={args.pass2_mg}) on "
+        print(f"[pass2] launching vLLM (model={args.kv_quant_method}, MG={args.pass2_mg}) on "
               f"{len(prompts)} prompts; first prompt ends with: {repr(prompts[0][-100:])}")
         llm_kwargs = dict(
-            model=args.model_path, dtype="auto",
+            model=args.model, dtype="auto",
             tensor_parallel_size=args.tp,
             gpu_memory_utilization=args.gpu_memory_utilization,
             max_num_seqs=args.max_num_seqs,
@@ -303,7 +304,7 @@ def main():
         sys.path.insert(0, str(Path(__file__).parent))
         from verify_compiled_graph import verify as _verify_graph
         cache_root = os.environ.get("VLLM_CACHE_ROOT") or f"/tmp/vllm_cache_{os.getpid()}"
-        ok = _verify_graph(args.model, cache_root, verbose=True)
+        ok = _verify_graph(args.kv_quant_method, cache_root, verbose=True)
         if not ok:
             print("[WARN] GRAPH-VERIFY FAILED -- patches may have been silently bypassed!")
     except Exception as e:

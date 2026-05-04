@@ -85,9 +85,9 @@ MML32=$((PASS2_MG + PROMPT_BUDGET))
 # ---- variant config + calib (SmoothKV only) ----
 calib_path=""
 case "$VARIANT" in
-  bf16)     METHOD_ARGS="--model bf16";              VARIANT_TAG="bf16" ;;
-  fp8)      METHOD_ARGS="--model fp8 --group_size 128";    VARIANT_TAG="fp8_g128" ;;
-  pertoken) METHOD_ARGS="--model pertoken --bits 4 --group_size 128"; VARIANT_TAG="pertoken_int4_g128" ;;
+  bf16)     METHOD_ARGS="--kv_quant_method bf16";              VARIANT_TAG="bf16" ;;
+  fp8)      METHOD_ARGS="--kv_quant_method fp8 --group_size 128";    VARIANT_TAG="fp8_g128" ;;
+  pertoken) METHOD_ARGS="--kv_quant_method pertoken --bits 4 --group_size 128"; VARIANT_TAG="pertoken_int4_g128" ;;
   smkv)
     # Format alpha/beta into filename (e.g. 1 → "1", 0.75 → "0.75")
     fmt() { /usr/bin/awk -v v="$1" 'BEGIN{ if(v==int(v)) printf "%d", v; else printf "%g", v; }'; }
@@ -107,7 +107,7 @@ case "$VARIANT" in
     if [ ! -f "$BASE" ]; then
       /usr/bin/echo "[calib] generating base $BASE  (n_s=$NS, $( [ -n "$calib_chat_flag" ] && /usr/bin/echo chat-calib || /usr/bin/echo raw-calib ))"
       CUDA_VISIBLE_DEVICES=$GPUS $PY run_smoothkv_calibrate.py \
-        --model_path "$MODEL_PATH" \
+        --model "$MODEL_PATH" \
         --num_samples $NS --seq_length 2048 \
         --alpha 1.0 --beta 1.0 \
         $calib_chat_flag \
@@ -120,7 +120,7 @@ case "$VARIANT" in
         --base "$BASE" --alphas $ALPHA --betas $BETA --half_pair_max_k
     fi
     calib_path="$VAR"
-    METHOD_ARGS="--model smoothkv_fused --calib_path $calib_path --bits 4 --group_size 128"
+    METHOD_ARGS="--kv_quant_method smoothkv_fused --calib_path $calib_path --bits 4 --group_size 128"
     ;;
   *) /usr/bin/echo "variant must be bf16|fp8|pertoken|smkv"; exit 1 ;;
 esac
@@ -139,7 +139,7 @@ else
   /usr/bin/echo "[pass1] $TASK  on $MODEL_PATH  (TP=$TP, MG=$PASS1_MG, max_num_seqs=$MNS_P1)"
   CUDA_VISIBLE_DEVICES=$GPUS $PY run_eval_vllm.py \
       $METHOD_ARGS \
-      --model_path "$MODEL_PATH" \
+      --model "$MODEL_PATH" \
       --task "$TASK" --apply_chat_template \
       --max_gen_toks $PASS1_MG --max_model_len $MML4 \
       --max_num_seqs $MNS_P1 --batch_size $MNS_P1 --tp $TP \
@@ -166,7 +166,7 @@ elif [ -f "$ADAPTIVE" ]; then
 else
   /usr/bin/echo "[pass2] $TASK  retry truncated subset @ MG=$PASS2_MG  (max_num_seqs=$MNS_P2)"
   CUDA_VISIBLE_DEVICES=$GPUS $PY scripts/adaptive_pass2.py \
-      --samples "$SAMPLES" --task "$TASK" --model_path "$MODEL_PATH" \
+      --samples "$SAMPLES" --task "$TASK" --model "$MODEL_PATH" \
       $METHOD_ARGS \
       --pass1_mg $PASS1_MG --pass2_mg $PASS2_MG \
       --max_model_len $MML32 --max_num_seqs $MNS_P2 --tp $TP \

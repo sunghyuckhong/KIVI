@@ -9,18 +9,19 @@
 #
 # Quick start:
 #   make setup                            # one-time: build vllm fork + venv
-#   make test                             # run unit tests after setup
-#   make run-llama
-#   make run-mistral
-#   make run-qwen3                        # 8b
-#   make run-qwen3 QWEN3_SIZE=32b         # 32b on TP=2 (auto GPUS=0,1)
-#   make run-all                          # all three families
+#   make test                             # unit tests after setup
+#   make run-qwen3-8b                     # full sweep on Qwen3-8B (single GPU)
+#   make run-qwen3-32b GPUS=0,1           # Qwen3-32B (TP=2)
+#   make run-llama                        # Llama-3-8B-Instruct
+#   make run-mistral                      # Mistral-7B-Instruct-v0.2
+#   make run-exaone GPUS=0,1              # EXAONE-4.5-33B (TP=2)
+#   make run-all                          # qwen3-8b + llama + mistral
 #
 # Common overrides:
-#   make run-qwen3 VARIANTS="bf16 smkv"
+#   make run-qwen3-8b VARIANTS="bf16 smkv"
 #   make run-llama TASKS=gsm8k_cot
 #   make run-llama LLAMA_MODEL=meta-llama/Meta-Llama-3-70B-Instruct GPUS="0,1"
-#   make run-qwen3 ALPHA=0.5 BETA=0.5     # SmoothKV variant sweep
+#   make run-qwen3-8b ALPHA=0.5 BETA=0.5  # SmoothKV variant sweep
 # =============================================================================
 
 SHELL := /bin/bash
@@ -44,16 +45,7 @@ BETA           ?= 1.0
 
 LLAMA_MODEL    ?= meta-llama/Meta-Llama-3-8B-Instruct
 MISTRAL_MODEL  ?= mistralai/Mistral-7B-Instruct-v0.2
-QWEN3_SIZE     ?= 8b
-
-# Qwen3-32B requires TP=2 → default to two GPUs unless user overrides.
-ifeq ($(QWEN3_SIZE),32b)
-  GPUS ?= 0,1
-else
-  GPUS ?= 0
-endif
-
-SWEEP_DIR      := scripts
+GPUS           ?= 0     # override to "0,1" for TP=2 (run-qwen3-32b, run-exaone)
 
 # --- Colors ------------------------------------------------------------------
 # Store the actual ESC byte (not the literal "\033" string) so awk/echo/printf
@@ -65,7 +57,8 @@ RESET  := $(shell printf '\033[0m')
 
 # =============================================================================
 
-.PHONY: help status setup setup-fork test print-pin run-llama run-mistral run-qwen3 run-all clean-stamps
+.PHONY: help status setup setup-fork test print-pin \
+        run-qwen3-8b run-qwen3-32b run-llama run-mistral run-exaone run-all
 
 # --- Environment setup -------------------------------------------------------
 setup: $(VENV)/bin/activate ## One-time: build vllm fork + venv + install KIVI deps
@@ -106,7 +99,7 @@ help: ## Show available targets
 		awk 'BEGIN {FS = ":## "}; {printf "  $(CYAN)%-16s$(RESET) %s\n", $$1, $$2}'
 	@echo ""
 	@echo "  Common overrides: VARIANTS, TASKS, GPUS, NS, ALPHA, BETA,"
-	@echo "                    LLAMA_MODEL, MISTRAL_MODEL, QWEN3_SIZE"
+	@echo "                    LLAMA_MODEL, MISTRAL_MODEL"
 	@echo ""
 
 status: ## Print resolved sweep parameters
@@ -119,38 +112,53 @@ status: ## Print resolved sweep parameters
 	@echo "  BETA:           $(BETA)"
 	@echo "  LLAMA_MODEL:    $(LLAMA_MODEL)"
 	@echo "  MISTRAL_MODEL:  $(MISTRAL_MODEL)"
-	@echo "  QWEN3_SIZE:     $(QWEN3_SIZE)"
 	@echo ""
 
-run-llama: ## Sweep Llama-family on $(LLAMA_MODEL)
-	@echo "$(GREEN)>>> Llama sweep — $(LLAMA_MODEL)$(RESET)"
-	@bash $(SWEEP_DIR)/sweep_llama.sh \
-		--model "$(LLAMA_MODEL)" \
-		--variants "$(VARIANTS)" \
-		--tasks "$(TASKS)" \
-		--gpus "$(GPUS)" \
-		--ns $(NS) --alpha $(ALPHA) --beta $(BETA)
+# --- Per-family sweeps: VARIANTS × TASKS via scripts/run_eval_<family>.sh ---
 
-run-mistral: ## Sweep Mistral-family on $(MISTRAL_MODEL)
-	@echo "$(GREEN)>>> Mistral sweep — $(MISTRAL_MODEL)$(RESET)"
-	@bash $(SWEEP_DIR)/sweep_mistral.sh \
-		--model "$(MISTRAL_MODEL)" \
-		--variants "$(VARIANTS)" \
-		--tasks "$(TASKS)" \
-		--gpus "$(GPUS)" \
-		--ns $(NS) --alpha $(ALPHA) --beta $(BETA)
+run-qwen3-8b: ## Sweep Qwen3-8B (4 variants × 3 tasks) on $(GPUS)
+	@for v in $(VARIANTS); do \
+	  for t in $(TASKS); do \
+	    echo "$(GREEN)>>> Qwen3-8B / $$v / $$t$(RESET)"; \
+	    bash scripts/run_eval_qwen3.sh --size 8b --variant $$v --task $$t \
+	      --gpus $(GPUS) --ns $(NS) --alpha $(ALPHA) --beta $(BETA) || exit 1; \
+	  done; \
+	done
 
-run-qwen3: ## Sweep Qwen3 (size via QWEN3_SIZE=8b|32b)
-	@echo "$(GREEN)>>> Qwen3-$(QWEN3_SIZE) sweep$(RESET)"
-	@bash $(SWEEP_DIR)/sweep_qwen3.sh \
-		--size $(QWEN3_SIZE) \
-		--variants "$(VARIANTS)" \
-		--tasks "$(TASKS)" \
-		--gpus "$(GPUS)" \
-		--ns $(NS) --alpha $(ALPHA) --beta $(BETA)
+run-qwen3-32b: ## Sweep Qwen3-32B (TP=2; pass GPUS="0,1")
+	@for v in $(VARIANTS); do \
+	  for t in $(TASKS); do \
+	    echo "$(GREEN)>>> Qwen3-32B / $$v / $$t$(RESET)"; \
+	    bash scripts/run_eval_qwen3.sh --size 32b --variant $$v --task $$t \
+	      --gpus $(GPUS) --ns $(NS) --alpha $(ALPHA) --beta $(BETA) || exit 1; \
+	  done; \
+	done
 
-run-all: run-llama run-mistral run-qwen3 ## Run all three family sweeps sequentially
+run-llama: ## Sweep $(LLAMA_MODEL) on $(GPUS)
+	@for v in $(VARIANTS); do \
+	  for t in $(TASKS); do \
+	    echo "$(GREEN)>>> $(LLAMA_MODEL) / $$v / $$t$(RESET)"; \
+	    bash scripts/run_eval_llama.sh --model "$(LLAMA_MODEL)" --variant $$v --task $$t \
+	      --gpus $(GPUS) --ns $(NS) --alpha $(ALPHA) --beta $(BETA) || exit 1; \
+	  done; \
+	done
 
-clean-stamps: ## Remove stale kivi_vllm_plugin marker files (/tmp/kivi_active_*.json)
-	@rm -f /tmp/kivi_active_*.json
-	@echo "$(GREEN)Cleaned /tmp/kivi_active_*.json$(RESET)"
+run-mistral: ## Sweep $(MISTRAL_MODEL) on $(GPUS)
+	@for v in $(VARIANTS); do \
+	  for t in $(TASKS); do \
+	    echo "$(GREEN)>>> $(MISTRAL_MODEL) / $$v / $$t$(RESET)"; \
+	    bash scripts/run_eval_mistral.sh --model "$(MISTRAL_MODEL)" --variant $$v --task $$t \
+	      --gpus $(GPUS) --ns $(NS) --alpha $(ALPHA) --beta $(BETA) || exit 1; \
+	  done; \
+	done
+
+run-exaone: ## Sweep EXAONE-4.5-33B (TP=2; pass GPUS="0,1")
+	@for v in $(VARIANTS); do \
+	  for t in $(TASKS); do \
+	    echo "$(GREEN)>>> EXAONE-4.5-33B / $$v / $$t$(RESET)"; \
+	    bash scripts/run_eval_exaone.sh --variant $$v --task $$t \
+	      --gpus $(GPUS) --ns $(NS) --alpha $(ALPHA) --beta $(BETA) || exit 1; \
+	  done; \
+	done
+
+run-all: run-qwen3-8b run-llama run-mistral ## Run qwen3-8b + llama + mistral (skips 32b/exaone)

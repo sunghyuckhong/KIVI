@@ -80,9 +80,9 @@ assert 'exaone4_5_text' in src, 'missing exaone4_5_text→exaone4 alias patch (s
 # ---- variant config ----
 calib_path=""
 case "$VARIANT" in
-  bf16)     METHOD_ARGS="--model bf16";              VARIANT_TAG="bf16" ;;
-  fp8)      METHOD_ARGS="--model fp8 --group_size 128";    VARIANT_TAG="fp8_g128" ;;
-  pertoken) METHOD_ARGS="--model pertoken --bits 4 --group_size 128"; VARIANT_TAG="pertoken_int4_g128" ;;
+  bf16)     METHOD_ARGS="--kv_quant_method bf16";              VARIANT_TAG="bf16" ;;
+  fp8)      METHOD_ARGS="--kv_quant_method fp8 --group_size 128";    VARIANT_TAG="fp8_g128" ;;
+  pertoken) METHOD_ARGS="--kv_quant_method pertoken --bits 4 --group_size 128"; VARIANT_TAG="pertoken_int4_g128" ;;
   smkv)
     fmt() { /usr/bin/awk -v v="$1" 'BEGIN{ if(v==int(v)) printf "%d", v; else printf "%g", v; }'; }
     AS=$(fmt $ALPHA); BS=$(fmt $BETA)
@@ -93,7 +93,7 @@ case "$VARIANT" in
     if [ ! -f "$BASE" ]; then
       /usr/bin/echo "[calib] generating base $BASE  (n_s=$NS)"
       CUDA_VISIBLE_DEVICES=$GPUS $PY run_smoothkv_calibrate.py \
-        --model_path "$MODEL_PATH" \
+        --model "$MODEL_PATH" \
         --num_samples $NS --seq_length 2048 \
         --alpha 0.5 --beta 0.5 --samples_per_channel 10000 \
         --output "$BASE" --device auto
@@ -105,7 +105,7 @@ case "$VARIANT" in
         --pair_max_k --no_head_uniform_k
     fi
     calib_path="$VAR"
-    METHOD_ARGS="--model smoothkv_fused --calib_path $calib_path --bits 4 --group_size 128"
+    METHOD_ARGS="--kv_quant_method smoothkv_fused --calib_path $calib_path --bits 4 --group_size 128"
     ;;
   *) /usr/bin/echo "variant must be bf16|fp8|pertoken|smkv"; exit 1 ;;
 esac
@@ -120,7 +120,7 @@ if [ -f "$RESULT" ]; then
 else
   /usr/bin/echo "[run] $TASK  on $MODEL_PATH  (TP=2, MG=$MG, max_num_seqs=8)"
   CUDA_VISIBLE_DEVICES=$GPUS $PY run_eval_vllm.py \
-      $METHOD_ARGS --model_path "$MODEL_PATH" \
+      $METHOD_ARGS --model "$MODEL_PATH" \
       --task "$TASK" --apply_chat_template \
       --max_gen_toks $MG --max_model_len $MML \
       --max_num_seqs 8 --batch_size 8 --tp 2 \

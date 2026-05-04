@@ -7,7 +7,7 @@ For each (layer, head, channel) we compute:
 
 Usage:
   python run_smoothkv_calibrate.py \
-      --model_path mistralai/Mistral-7B-Instruct-v0.2 \
+      --model mistralai/Mistral-7B-Instruct-v0.2 \
       --num_samples 128 \
       --seq_length 2048 \
       --alpha 0.5 \
@@ -28,7 +28,8 @@ from datasets import load_dataset
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--model_path", type=str, required=True)
+    p.add_argument("--model", type=str, required=True,
+                   help="HF model path or hub id (e.g. Qwen/Qwen3-8B)")
     p.add_argument("--num_samples", type=int, default=128)
     p.add_argument("--seq_length", type=int, default=2048)
     p.add_argument("--alpha", type=float, default=0.5,
@@ -273,8 +274,8 @@ def main():
     args = parse_args()
     device = args.device
 
-    print(f"Loading model: {args.model_path}")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_path, use_fast=False)
+    print(f"Loading model: {args.model}")
+    tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -291,11 +292,11 @@ def main():
     # hooks attach to modeling_exaone4.apply_rotary_pos_emb so they fire
     # regardless of which wrapper holds the language model.
     try:
-        model = AutoModelForCausalLM.from_pretrained(args.model_path, **load_kwargs)
+        model = AutoModelForCausalLM.from_pretrained(args.model, **load_kwargs)
     except (ValueError, KeyError) as e:
         print(f"AutoModelForCausalLM failed ({type(e).__name__}); trying AutoModel for multimodal wrapper")
         from transformers import AutoModel
-        model = AutoModel.from_pretrained(args.model_path, **load_kwargs)
+        model = AutoModel.from_pretrained(args.model, **load_kwargs)
     model = model if device == "auto" else model.to(device)
     model = model.eval()
     if device == "auto":
@@ -416,7 +417,7 @@ def main():
         "max_v":         collector.max_v.cpu(),
         "alpha": alpha,
         "beta": beta,
-        "model_path": args.model_path,
+        "model_path": args.model,
         "num_samples": args.num_samples,
         "seq_length": args.seq_length,
         "num_layers": num_layers,

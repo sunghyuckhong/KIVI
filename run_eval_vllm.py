@@ -31,16 +31,19 @@ DEFAULT_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--model",       choices=["bf16", "fp16", "fp8", "pertoken", "smoothkv", "smoothkv_fused"], required=True,
+    p.add_argument("--kv_quant_method", "--kvq", dest="kv_quant_method",
+                   choices=["bf16", "fp16", "fp8", "pertoken", "smoothkv", "smoothkv_fused"],
+                   required=True,
                    help="bf16/fp16 are the same no-quant baseline (dtype=auto picks the model's native dtype). "
                         "smoothkv_fused: fold s_K into q_norm/k_norm γ (or qkv_proj rows for non-q-norm "
                         "models) at load time — zero per-step cost beyond pertoken int4.")
     p.add_argument("--task",        required=True,
                    help="e.g. truthfulqa_gen, coqa, gsm8k_32k, gpqa_diamond_cot_n_shot_32k, math500_32k")
-    p.add_argument("--model_path",  default=DEFAULT_MODEL)
+    p.add_argument("--model",       default=DEFAULT_MODEL,
+                   help="HF model path or hub id (e.g. Qwen/Qwen3-8B)")
     p.add_argument("--group_size",  type=int, default=128)
     p.add_argument("--bits",        type=int, default=4, help="bits for pertoken/smoothkv")
-    p.add_argument("--calib_path",  default=None, help="required for --model smoothkv")
+    p.add_argument("--calib_path",  default=None, help="required for --kv_quant_method smoothkv / smoothkv_fused")
     p.add_argument("--batch_size",  type=int, default=1, help="lm_eval batch_size (vLLM handles internal batching)")
     p.add_argument("--max_gen_toks", type=int, default=None)
     p.add_argument("--tp",          type=int, default=1, help="tensor parallel size")
@@ -90,18 +93,18 @@ def build_kv_quant_config(args):
     # AND triton-cubin races between concurrent launches.
     _isolate_compile_cache()
 
-    if args.model in ("bf16", "fp16"):
+    if args.kv_quant_method in ("bf16", "fp16"):
         return None  # no quant — unquantized baseline
-    if args.model == "fp8":
+    if args.kv_quant_method == "fp8":
         return KVCacheQuantConfig(method="fp8", group_size=args.group_size)
-    if args.model == "pertoken":
+    if args.kv_quant_method == "pertoken":
         return KVCacheQuantConfig(method="pertoken", group_size=args.group_size,
                                   bits=args.bits)
-    if args.model == "smoothkv":
+    if args.kv_quant_method == "smoothkv":
         assert args.calib_path, "--calib_path required for smoothkv"
         return KVCacheQuantConfig(method="smoothkv", group_size=args.group_size,
                                   bits=args.bits, calib_path=args.calib_path)
-    if args.model == "smoothkv_fused":
+    if args.kv_quant_method == "smoothkv_fused":
         # Zero-runtime-cost path: vllm fork's Worker.load_model post-load hook
         # (`maybe_run_post_load_fusion`) folds s_K / s_V into qkv_proj /
         # o_proj weights once per worker. Each layer's runtime method becomes
@@ -110,24 +113,24 @@ def build_kv_quant_config(args):
         return KVCacheQuantConfig(method="smoothkv_fused",
                                   group_size=args.group_size, bits=args.bits,
                                   calib_path=args.calib_path)
-    raise ValueError(f"unknown --model {args.model}")
+    raise ValueError(f"unknown --model {args.kv_quant_method}")
 
 
 def output_name(args):
     t = args.task
-    m = args.model_path.rstrip("/").split("/")[-1].lower()
+    m = args.model.rstrip("/").split("/")[-1].lower()
     chat = "_chat" if args.apply_chat_template else ""
     shot = f"_{args.num_fewshot}shot" if args.num_fewshot is not None else ""
     t = t + shot
     # `chat` suffix is appended to the method portion for ALL methods so
     # chat-templated runs don't collide with non-chat runs in the filename.
-    if args.model in ("bf16", "fp16"):
-        return f"{t}_{m}_{args.model}{chat}_vllm"
-    if args.model == "fp8":
+    if args.kv_quant_method in ("bf16", "fp16"):
+        return f"{t}_{m}_{args.kv_quant_method}{chat}_vllm"
+    if args.kv_quant_method == "fp8":
         return f"{t}_{m}_fp8_g{args.group_size}{chat}_vllm"
-    if args.model == "pertoken":
+    if args.kv_quant_method == "pertoken":
         return f"{t}_{m}_pertoken_int{args.bits}_g{args.group_size}{chat}_vllm"
-    if args.model == "smoothkv":
+    if args.kv_quant_method == "smoothkv":
         stem = os.path.basename(args.calib_path).replace(".pt", "")
         # strip "smoothkv_<model>_" prefix
         try:
@@ -136,7 +139,7 @@ def output_name(args):
         except ValueError:
             calib_tag = stem
         return f"{t}_{m}_smoothkv_g{args.group_size}_{calib_tag}{chat}_vllm"
-    if args.model == "smoothkv_fused":
+    if args.kv_quant_method == "smoothkv_fused":
         stem = os.path.basename(args.calib_path).replace(".pt", "")
         try:
             idx = stem.lower().index(m) + len(m)
@@ -144,7 +147,7 @@ def output_name(args):
         except ValueError:
             calib_tag = stem
         return f"{t}_{m}_smoothkv_fused_g{args.group_size}_{calib_tag}{chat}_vllm"
-    raise ValueError(f"unknown model {args.model}")
+    raise ValueError(f"unknown model {args.kv_quant_method}")
 
 
 def main():
@@ -158,7 +161,7 @@ def main():
     tm = TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks"))
 
     print(f"\n{'='*60}")
-    print(f"  [vLLM] model={args.model}  task={args.task}  path={args.model_path}")
+    print(f"  [vLLM] model={args.kv_quant_method}  task={args.task}  path={args.model}")
     out_name = output_name(args)
     out_path = f"logs/{out_name}_results.json"
     print(f"  output → {out_path}")
@@ -183,9 +186,9 @@ def main():
         enforce_eager = False
     else:
         # Default: cudagraphs ON for vllm 0.20+, eager for older quant paths.
-        enforce_eager = _is_old_vllm and (args.model not in ("bf16", "fp16"))
+        enforce_eager = _is_old_vllm and (args.kv_quant_method not in ("bf16", "fp16"))
     vllm_kwargs = dict(
-        pretrained=args.model_path,
+        pretrained=args.model,
         dtype="auto",   # respect model's native dtype (bfloat16 for Qwen3)
         tensor_parallel_size=args.tp,
         batch_size=args.batch_size,          # MUST equal max_num_seqs to saturate concurrency
@@ -204,7 +207,7 @@ def main():
     # profiling crashes at engine init. We never feed images/videos for math/QA
     # tasks, so disable mm to skip profiling. (Image processor stub also required:
     # see transformers/models/exaone4_5/image_processing_exaone4_5.py.)
-    if "EXAONE-4.5" in args.model_path:
+    if "EXAONE-4.5" in args.model:
         vllm_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
     if kv_quant_cfg is not None:
         vllm_kwargs["kv_cache_quant_config"] = kv_quant_cfg
@@ -251,7 +254,7 @@ def main():
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts"))
         from verify_compiled_graph import verify as _verify_graph
         cache_root = os.environ.get("VLLM_CACHE_ROOT") or f"/tmp/vllm_cache_{os.getpid()}"
-        ok = _verify_graph(args.model, cache_root, verbose=True)
+        ok = _verify_graph(args.kv_quant_method, cache_root, verbose=True)
         if not ok:
             print("[WARN] GRAPH-VERIFY FAILED -- patches may have been silently bypassed!")
     except Exception as e:
