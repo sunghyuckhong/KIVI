@@ -28,9 +28,9 @@ SHELL := /bin/bash
 
 # --- vllm-compression-part fork (KV fake-quant lives here) -------------------
 # Pinned commit on smoothkv_exp; bump after re-verifying graph capture.
-VLLM_FORK_PATH    ?= /workspace/vllm-compression-part
-VLLM_FORK_BRANCH  ?= smoothkv_exp
-VLLM_FORK_COMMIT  ?= 0f687e4b94
+VLLM_FORK_PATH    ?= /workspace/sunghyuck/vllm-compression-part
+VLLM_FORK_BRANCH  ?= kv_cache_quant
+VLLM_FORK_COMMIT  ?= 675ba44c0
 
 VENV       ?= .venv
 PY         := $(VENV)/bin/python
