@@ -14,8 +14,7 @@ import torch
 
 from vllm.model_executor.layers.quantization.kv_fake_quant import (
     fake_quantize_fp8,
-    fake_quantize_k_pertoken,
-    fake_quantize_v_pertoken,
+    fake_quantize_pertoken,
     fake_quantize_k_perchannel,
 )
 
@@ -70,8 +69,8 @@ def method_fp8(K, V, group_size=128, **kw):
 
 def method_pertoken(K, V, bits=4, group_size=128, **kw):
     nh, D = K.shape[1], K.shape[3]
-    kf = lambda x: fake_quantize_k_pertoken(x, nh, D, group_size, bits)
-    vf = lambda x: fake_quantize_v_pertoken(x, nh, D, group_size, bits)
+    kf = lambda x: fake_quantize_pertoken(x, nh, D, group_size, bits)
+    vf = lambda x: fake_quantize_pertoken(x, nh, D, group_size, bits)
     return quant_passthrough_per_layer(K, V, kf, vf)
 
 
@@ -87,8 +86,8 @@ def method_smoothkv(K, V, calib_path, bits=4, group_size=128, **kw):
         sv_flat = sV_all[l].reshape(-1)
         kl = (K[l].transpose(0, 1).reshape(T, nh * D)) / sk_flat
         vl = (V[l].transpose(0, 1).reshape(T, nh * D)) / sv_flat
-        kl_q = fake_quantize_k_pertoken(kl, nh, D, group_size, bits)
-        vl_q = fake_quantize_v_pertoken(vl, nh, D, group_size, bits)
+        kl_q = fake_quantize_pertoken(kl, nh, D, group_size, bits)
+        vl_q = fake_quantize_pertoken(vl, nh, D, group_size, bits)
         kl_q = kl_q * sk_flat
         vl_q = vl_q * sv_flat
         K_q[l] = kl_q.view(T, nh, D).transpose(0, 1)
