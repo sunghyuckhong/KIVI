@@ -116,8 +116,10 @@ RESULT=logs/${TASK}_${MODEL_TAG}_${VARIANT_TAG}_chat_vllm_results.json
 /bin/mkdir -p logs/run_out logs/calib
 
 # ---- single-pass run ----
-if [ -f "$RESULT" ]; then
-  /usr/bin/echo "[run] SKIP — results.json exists"
+# Set FORCE=1 to redo a cell whose outputs already exist.
+FORCE="${FORCE:-0}"
+if [ "$FORCE" != "1" ] && [ -f "$RESULT" ]; then
+  /usr/bin/echo "[run] SKIP — results.json exists (set FORCE=1 to override)"
 else
   /usr/bin/echo "[run] $TASK  on $MODEL_PATH  (TP=2, MG=$MG, max_num_seqs=8)"
   CUDA_VISIBLE_DEVICES=$GPUS $PY run_eval_vllm.py \

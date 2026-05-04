@@ -107,7 +107,9 @@ P2_LOG=logs/run_out/${MODEL_TAG}_${VARIANT_TAG}_pass2_${TASK}.log
 /bin/mkdir -p logs/run_out logs/calib
 
 # ---- Pass 1 ----
-if [ ! -f "$SAMPLES" ] || [ ! -f "$RESULTS" ]; then
+# Set FORCE=1 to redo a cell whose outputs already exist.
+FORCE="${FORCE:-0}"
+if [ "$FORCE" = "1" ] || [ ! -f "$SAMPLES" ] || [ ! -f "$RESULTS" ]; then
   /usr/bin/echo "[pass1] $TASK  on $MODEL_PATH  (TP=$TP, MG=$PASS1_MG)"
   CUDA_VISIBLE_DEVICES=$GPUS $PY run_eval_vllm.py \
       $METHOD_ARGS --model "$MODEL_PATH" \
@@ -125,7 +127,7 @@ if [ "$PASS1_MG" -eq "$PASS2_MG" ]; then
   /usr/bin/echo "[pass2] skipped (pass1_mg == pass2_mg == $PASS1_MG; model_max_len=$MODEL_MAX_LEN doesn't allow longer retry)"
   /bin/cp "$RESULTS" "$ADAPTIVE"
 else
-  if [ ! -f "$ADAPTIVE" ]; then
+  if [ "$FORCE" = "1" ] || [ ! -f "$ADAPTIVE" ]; then
     /usr/bin/echo "[pass2] retry truncated subset @ MG=$PASS2_MG"
     CUDA_VISIBLE_DEVICES=$GPUS $PY scripts/adaptive_pass2.py \
         --samples "$SAMPLES" --task "$TASK" --model "$MODEL_PATH" \
