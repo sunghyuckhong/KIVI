@@ -12,15 +12,19 @@
 #       --task gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot_32k \
 #       [--ns 512]                     # SmoothKV calib sample count
 #       [--alpha 1.0] [--beta 1.0]     # SmoothKV α/β
-#       [--chat_calib]                 # apply chat template at calibration time
+#       [--no_chat_calib]              # skip chat template at calibration (default: chat-calib ON)
 #       [--gpus 0]                     # CUDA_VISIBLE_DEVICES (single int for 8B, "a,b" for 32B TP=2)
 #
 # Examples:
 #   # Qwen3-8B BF16 on gsm8k_cot (single GPU)
 #   bash scripts/run_eval_qwen3.sh --size 8b --variant bf16 --task gsm8k_cot --gpus 0
 #
-#   # Qwen3-32B SmoothKV α=1 chat-calib n_s=512 on minerva (TP=2)
-#   bash scripts/run_eval_qwen3.sh --size 32b --variant smkv --chat_calib --gpus 0,1 \
+#   # Qwen3-32B SmoothKV α=1 chat-calib (default) n_s=512 on minerva (TP=2)
+#   bash scripts/run_eval_qwen3.sh --size 32b --variant smkv --gpus 0,1 \
+#       --task minerva_math500
+#
+#   # Same but with raw-text calibration instead of chat-template
+#   bash scripts/run_eval_qwen3.sh --size 32b --variant smkv --no_chat_calib --gpus 0,1 \
 #       --task minerva_math500
 #
 # Output:
@@ -36,7 +40,11 @@ export HF_TOKEN="${HF_TOKEN:-$(/bin/cat ~/.cache/huggingface/token 2>/dev/null |
 export NO_ENFORCE_EAGER=1
 
 # ---- args ----
-SIZE=""; VARIANT=""; TASK=""; GPUS="0"; NS=512; ALPHA=1.0; BETA=1.0; CHAT_CALIB=0
+# CHAT_CALIB defaults to 1: chat-template applied at calibration time matches
+# the eval-time prompt distribution (we always run with --apply_chat_template
+# at eval), which is the SmoothKV setting we ship in headline numbers. Use
+# --no_chat_calib to opt into raw-text calibration for ablation.
+SIZE=""; VARIANT=""; TASK=""; GPUS="0"; NS=512; ALPHA=1.0; BETA=1.0; CHAT_CALIB=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --size) SIZE="$2"; shift 2 ;;
@@ -47,6 +55,7 @@ while [ $# -gt 0 ]; do
     --alpha) ALPHA="$2"; shift 2 ;;
     --beta) BETA="$2"; shift 2 ;;
     --chat_calib) CHAT_CALIB=1; shift ;;
+    --no_chat_calib) CHAT_CALIB=0; shift ;;
     *) /usr/bin/echo "Unknown arg: $1"; exit 1 ;;
   esac
 done
