@@ -23,7 +23,7 @@ warnings.filterwarnings("ignore")
 import vllm  # noqa: F401
 import vllm.model_executor.models.llama  # noqa: F401
 
-from vllm.model_executor.layers.quantization.kv_fake_quant import configure_kv_quant
+from vllm.config import KVCacheQuantConfig
 
 
 DEFAULT_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
@@ -83,31 +83,34 @@ def _isolate_compile_cache():
     print(f"  [compile-cache-guard] using per-process cache {per_proc_cache}")
 
 
-def install_method(args):
-    """Configure vLLM's KV fake-quant scheme for the requested method."""
+def build_kv_quant_config(args):
+    """Return a KVCacheQuantConfig for the requested method, or None for
+    bf16/fp16 (no quant)."""
     # Per-PID compile cache: avoids cross-variant FX-graph hash collisions
     # AND triton-cubin races between concurrent launches.
     _isolate_compile_cache()
 
     if args.model in ("bf16", "fp16"):
-        return  # no quant — unquantized baseline
+        return None  # no quant — unquantized baseline
     if args.model == "fp8":
-        configure_kv_quant("fp8", group_size=args.group_size)
-    elif args.model == "pertoken":
-        configure_kv_quant("pertoken", group_size=args.group_size, bits=args.bits)
-    elif args.model == "smoothkv":
+        return KVCacheQuantConfig(method="fp8", group_size=args.group_size)
+    if args.model == "pertoken":
+        return KVCacheQuantConfig(method="pertoken", group_size=args.group_size,
+                                  bits=args.bits)
+    if args.model == "smoothkv":
         assert args.calib_path, "--calib_path required for smoothkv"
-        configure_kv_quant("smoothkv", group_size=args.group_size, bits=args.bits,
-                           calib_path=args.calib_path)
-    elif args.model == "smoothkv_fused":
-        # Zero-runtime-cost path: configure_kv_quant("smoothkv_fused") loads
-        # calib (CPU) into the global config; vllm fork's Worker.load_model
-        # post-load hook (`maybe_run_post_load_fusion`) folds s_K / s_V into
-        # qkv_proj / o_proj weights once per worker. Each layer's runtime
-        # method is set to "pertoken" by attach_kv_quant_to_layer.
+        return KVCacheQuantConfig(method="smoothkv", group_size=args.group_size,
+                                  bits=args.bits, calib_path=args.calib_path)
+    if args.model == "smoothkv_fused":
+        # Zero-runtime-cost path: vllm fork's Worker.load_model post-load hook
+        # (`maybe_run_post_load_fusion`) folds s_K / s_V into qkv_proj /
+        # o_proj weights once per worker. Each layer's runtime method becomes
+        # "pertoken".
         assert args.calib_path, "--calib_path required for smoothkv_fused"
-        configure_kv_quant("smoothkv_fused", group_size=args.group_size,
-                           bits=args.bits, calib_path=args.calib_path)
+        return KVCacheQuantConfig(method="smoothkv_fused",
+                                  group_size=args.group_size, bits=args.bits,
+                                  calib_path=args.calib_path)
+    raise ValueError(f"unknown --model {args.model}")
 
 
 def output_name(args):
@@ -146,7 +149,7 @@ def output_name(args):
 
 def main():
     args = parse_args()
-    install_method(args)
+    kv_quant_cfg = build_kv_quant_config(args)
 
     # Imports after patching so the vLLM model registry uses the patched forward
     from lm_eval import simple_evaluate, utils as lm_utils
@@ -203,6 +206,8 @@ def main():
     # see transformers/models/exaone4_5/image_processing_exaone4_5.py.)
     if "EXAONE-4.5" in args.model_path:
         vllm_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
+    if kv_quant_cfg is not None:
+        vllm_kwargs["kv_cache_quant_config"] = kv_quant_cfg
     lm = VLLM(**vllm_kwargs)
 
     gen_kwargs = None

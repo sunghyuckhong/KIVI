@@ -66,25 +66,28 @@ def parse_args():
     return p.parse_args()
 
 
-# ---------- patches ----------
-def install_method(args):
-    """Activate KV-quant patches for this process. Only used when generating."""
+# ---------- KV fake-quant config ----------
+def build_kv_quant_config(args):
+    """Return a KVCacheQuantConfig for the requested method, or None for
+    bf16/fp16. Pass to LLM(...) via kv_cache_quant_config=cfg."""
     if args.model in ("bf16", "fp16"):
-        return
-    import vllm  # noqa: F401
-    from vllm.model_executor.layers.quantization.kv_fake_quant import configure_kv_quant
+        return None
+    from vllm.config import KVCacheQuantConfig
     if args.model == "fp8":
-        configure_kv_quant("fp8", group_size=args.group_size)
-    elif args.model == "pertoken":
-        configure_kv_quant("pertoken", group_size=args.group_size, bits=args.bits)
-    elif args.model == "smoothkv":
+        return KVCacheQuantConfig(method="fp8", group_size=args.group_size)
+    if args.model == "pertoken":
+        return KVCacheQuantConfig(method="pertoken", group_size=args.group_size,
+                                  bits=args.bits)
+    if args.model == "smoothkv":
         assert args.calib_path, "--calib_path required for smoothkv"
-        configure_kv_quant("smoothkv", group_size=args.group_size, bits=args.bits,
-                           calib_path=args.calib_path)
-    elif args.model == "smoothkv_fused":
+        return KVCacheQuantConfig(method="smoothkv", group_size=args.group_size,
+                                  bits=args.bits, calib_path=args.calib_path)
+    if args.model == "smoothkv_fused":
         assert args.calib_path, "--calib_path required for smoothkv_fused"
-        configure_kv_quant("smoothkv_fused", group_size=args.group_size,
-                           bits=args.bits, calib_path=args.calib_path)
+        return KVCacheQuantConfig(method="smoothkv_fused",
+                                  group_size=args.group_size, bits=args.bits,
+                                  calib_path=args.calib_path)
+    raise ValueError(f"unknown --model {args.model}")
 
 
 # ---------- truncation detection ----------
@@ -110,7 +113,7 @@ def find_truncated(items, orig_mg, tokenizer):
 
 
 # ---------- generation ----------
-def generate_retries(args, items, truncated_idx):
+def generate_retries(args, items, truncated_idx, kv_quant_cfg=None):
     """Run vLLM on the truncated subset's prompts at retry_mg. Returns list of new texts."""
     import ast
     import vllm
@@ -153,6 +156,8 @@ def generate_retries(args, items, truncated_idx):
     if "EXAONE-4.5" in args.model_path:
         # Multimodal wrapper crashes mm-budget profiling without the (missing) video processor
         llm_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
+    if kv_quant_cfg is not None:
+        llm_kwargs["kv_cache_quant_config"] = kv_quant_cfg
 
     llm = LLM(**llm_kwargs)
     gk = retry_gen_kwargs[0] if retry_gen_kwargs else {}
@@ -315,9 +320,9 @@ def main():
     if args.from_merged_samples is None:
         if not args.samples:
             raise SystemExit("--samples is required in generation mode (omit only with --from_merged_samples)")
-        # Generation path: install patches THEN read samples (so plugin/runtime
-        # patches are armed before lm_eval imports load anything heavy).
-        install_method(args)
+        # Generation path: build the KV-quant config first; LLM(...) below
+        # gets it via kv_cache_quant_config=...
+        kv_quant_cfg = build_kv_quant_config(args)
 
         with open(args.samples) as f:
             sdata = json.load(f)
@@ -335,7 +340,7 @@ def main():
             print("[retry] nothing to rerun — first-pass result stands; only rescoring.")
             merged = copy.deepcopy(items)
         else:
-            new_texts = generate_retries(args, items, truncated_idx)
+            new_texts = generate_retries(args, items, truncated_idx, kv_quant_cfg)
             merged = merge_retries(items, truncated_idx, new_texts)
 
         # Save merged samples first so a scoring crash doesn't lose generation work

@@ -40,7 +40,7 @@ warnings.filterwarnings("ignore")
 
 import vllm  # noqa: F401
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from vllm.model_executor.layers.quantization.kv_fake_quant import configure_kv_quant
+from vllm.config import KVCacheQuantConfig
 
 
 def parse_args():
@@ -75,23 +75,29 @@ def _isolate_compile_cache():
     print(f"  [compile-cache-guard] using per-process cache {per_proc_cache}")
 
 
-def install_method(args):
+def build_kv_quant_config(args):
+    """Return a KVCacheQuantConfig for the requested method, or None for
+    bf16/fp16. Also sets a per-PID compile cache to avoid cross-variant
+    FX-graph hash collisions."""
     _isolate_compile_cache()
 
     if args.model in ("bf16", "fp16"):
-        return
+        return None
     if args.model == "fp8":
-        configure_kv_quant("fp8", group_size=args.group_size)
-    elif args.model == "pertoken":
-        configure_kv_quant("pertoken", group_size=args.group_size, bits=args.bits)
-    elif args.model == "smoothkv":
+        return KVCacheQuantConfig(method="fp8", group_size=args.group_size)
+    if args.model == "pertoken":
+        return KVCacheQuantConfig(method="pertoken", group_size=args.group_size,
+                                  bits=args.bits)
+    if args.model == "smoothkv":
         assert args.calib_path
-        configure_kv_quant("smoothkv", group_size=args.group_size, bits=args.bits,
-                           calib_path=args.calib_path)
-    elif args.model == "smoothkv_fused":
+        return KVCacheQuantConfig(method="smoothkv", group_size=args.group_size,
+                                  bits=args.bits, calib_path=args.calib_path)
+    if args.model == "smoothkv_fused":
         assert args.calib_path
-        configure_kv_quant("smoothkv_fused", group_size=args.group_size,
-                           bits=args.bits, calib_path=args.calib_path)
+        return KVCacheQuantConfig(method="smoothkv_fused",
+                                  group_size=args.group_size, bits=args.bits,
+                                  calib_path=args.calib_path)
+    raise ValueError(f"unknown --model {args.model}")
 
 
 def extract_prompt(arguments):
@@ -236,20 +242,25 @@ def main():
           f"({100*len(truncated_idx)/len(items):.1f}%)")
 
     if truncated_idx:
-        install_method(args)
+        kv_quant_cfg = build_kv_quant_config(args)
         from vllm import LLM, SamplingParams
 
         prompts = [extract_prompt(items[i]["arguments"]) for i in truncated_idx]
         print(f"[pass2] launching vLLM (model={args.model}, MG={args.pass2_mg}) on "
               f"{len(prompts)} prompts; first prompt ends with: {repr(prompts[0][-100:])}")
-        llm = LLM(model=args.model_path, dtype="auto",
-                  tensor_parallel_size=args.tp,
-                  gpu_memory_utilization=args.gpu_memory_utilization,
-                  max_num_seqs=args.max_num_seqs,
-                  max_model_len=args.max_model_len,
-                  enforce_eager=False,
-                  enable_prefix_caching=True,
-                  seed=1234)
+        llm_kwargs = dict(
+            model=args.model_path, dtype="auto",
+            tensor_parallel_size=args.tp,
+            gpu_memory_utilization=args.gpu_memory_utilization,
+            max_num_seqs=args.max_num_seqs,
+            max_model_len=args.max_model_len,
+            enforce_eager=False,
+            enable_prefix_caching=True,
+            seed=1234,
+        )
+        if kv_quant_cfg is not None:
+            llm_kwargs["kv_cache_quant_config"] = kv_quant_cfg
+        llm = LLM(**llm_kwargs)
         sp = SamplingParams(temperature=0.0, top_p=1.0, max_tokens=args.pass2_mg)
         outputs = llm.generate(prompts, sampling_params=sp, use_tqdm=True)
         new_texts = [o.outputs[0].text for o in outputs]
