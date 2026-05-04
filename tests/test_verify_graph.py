@@ -38,18 +38,18 @@ FORBIDDEN_OPS = {
 
 
 class _MockLayer(torch.nn.Module):
-    """Minimal stand-in for vllm.Attention with the attrs apply_kv_quant reads."""
+    """Minimal stand-in for vllm.Attention with a kv_quant_state attached."""
     def __init__(self, method, num_kv_heads=8, head_size=128,
                  group_size=128, bits=4, sk=None, sv=None):
         super().__init__()
-        self._kv_quant_method = method
-        self._kv_quant_group_size = group_size
-        self._kv_quant_bits = bits
+        from vllm.model_executor.layers.quantization.kv_fake_quant import (
+            LayerKVQuantState,
+        )
         self.num_kv_heads = num_kv_heads
         self.head_size = head_size
-        if sk is not None:
-            self.register_buffer("_kv_quant_s_k", sk, persistent=False)
-            self.register_buffer("_kv_quant_s_v", sv, persistent=False)
+        self.kv_quant_state = LayerKVQuantState(
+            method=method, group_size=group_size, bits=bits, s_k=sk, s_v=sv,
+        )
 
 
 def _captured_op_names(fn, args) -> list[str]:
@@ -117,21 +117,21 @@ def test_apply_kv_quant_smoothkv_emits_expected_ops():
 
 @requires_cuda
 def test_bf16_emits_no_quant_ops():
-    """bf16 must be a no-op -- apply_kv_quant returns immediately on the
-    method check, so no quant op should ever appear in the graph."""
-    # apply_kv_quant raises on bf16 (only branches are fp8/pertoken/smoothkv).
-    # Verifying the no-op happens via attach_kv_quant_to_layer which doesn't
-    # set _kv_quant_method on bf16 -- so Attention.forward's `if getattr(...)`
-    # short-circuits. We exercise that short-circuit here.
+    """bf16 must be a no-op -- apply_kv_quant raises on bf16 (only branches
+    are fp8/pertoken/smoothkv). Verifying the no-op happens via
+    attach_kv_quant_to_layer which doesn't attach kv_quant_state on bf16,
+    so Attention.forward's `if getattr(...)` short-circuits. We exercise
+    that short-circuit here.
+    """
     class _BareLayer:
-        # No _kv_quant_method attr set -- represents a layer where bf16 was
-        # configured (configure_kv_quant("bf16", ...) doesn't set anything).
+        # No kv_quant_state attached -- represents a layer where bf16 was
+        # configured (KVCacheQuantConfig(method="bf16", ...) -> no-op).
         pass
 
     layer = _BareLayer()
 
     def fn(k, v):
-        if getattr(layer, "_kv_quant_method", None):
+        if getattr(layer, "kv_quant_state", None) is not None:
             from vllm.model_executor.layers.quantization.kv_fake_quant import apply_kv_quant
             return apply_kv_quant(layer, k, v)
         return k, v
