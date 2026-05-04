@@ -8,7 +8,7 @@
 # Usage:
 #   bash scripts/run_eval_qwen3.sh \
 #       --size 8b|32b \
-#       --variant bf16|fp8|pertoken|smkv \
+#       --variant bf16|fp8|pertoken|smkv|smkv_per_head \
 #       --task gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot_32k \
 #       [--ns 512]                     # SmoothKV calib sample count
 #       [--alpha 1.0] [--beta 1.0]     # SmoothKV α/β
@@ -60,7 +60,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -z "$SIZE" ] || [ -z "$VARIANT" ] || [ -z "$TASK" ] && {
-  /usr/bin/echo "Required: --size {8b|32b} --variant {bf16|fp8|pertoken|smkv} --task {gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot_32k}"
+  /usr/bin/echo "Required: --size {8b|32b} --variant {bf16|fp8|pertoken|smkv|smkv_per_head} --task {gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot_32k}"
   exit 1
 }
 
@@ -131,7 +131,64 @@ case "$VARIANT" in
     calib_path="$VAR"
     METHOD_ARGS="--kv_quant_method smoothkv_fused --calib_path $calib_path --bits 4 --group_size 128"
     ;;
-  *) /usr/bin/echo "variant must be bf16|fp8|pertoken|smkv"; exit 1 ;;
+  smkv_per_head)
+    # Per-(layer, kv_head, head_dim) UNIQUE smoothing factors. For Qwen3-8B
+    # that's 36 layers × 8 kv_heads × 128 = 36864 unique s_K values (and
+    # same for s_V) — versus the head-uniform `smkv` variant which shares
+    # a single (head_dim,) row across all heads in a layer.
+    #
+    # Why a separate variant: the fused path (smoothkv_fused) folds s_K
+    # into q_norm.γ / k_norm.γ which are shape (head_dim,) shared across
+    # heads — that fusion mathematically requires head-uniform s_K. The
+    # non-fused runtime path (vllm_kv_quant::smoothkv kernel in the fork)
+    # applies s_K per-(head, channel) at attention time AFTER RoPE, so it
+    # has no such constraint.
+    #
+    # Note: s_K is applied symmetrically here only for K-side quantization
+    # preconditioning (K /= s_K → quant → K *= s_K). Q is untouched at
+    # runtime — there's no Q-side scale. So this is a per-channel quant
+    # range balancer, not a SmoothQuant-style activation migration.
+    fmt() { /usr/bin/awk -v v="$1" 'BEGIN{ if(v==int(v)) printf "%d", v; else printf "%g", v; }'; }
+    AS=$(fmt $ALPHA); BS=$(fmt $BETA)
+    if [ "$CHAT_CALIB" -eq 1 ]; then
+      BASE="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_chat.pt"
+      VAR="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_chat_a${AS}_b${BS}_perhead.pt"
+      VARIANT_TAG="smoothkv_g128_perc_ns${NS}_chat_a${AS}_b${BS}_perhead"
+      calib_chat_flag="--apply_chat_template"
+    else
+      BASE="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}.pt"
+      VAR="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_a${AS}_b${BS}_perhead.pt"
+      VARIANT_TAG="smoothkv_g128_perc_ns${NS}_a${AS}_b${BS}_perhead"
+      calib_chat_flag=""
+    fi
+    if [ ! -f "$BASE" ]; then
+      /usr/bin/echo "[calib] generating base $BASE  (n_s=$NS, $( [ -n "$calib_chat_flag" ] && /usr/bin/echo chat-calib || /usr/bin/echo raw-calib ))"
+      CUDA_VISIBLE_DEVICES=$GPUS $PY run_smoothkv_calibrate.py \
+        --model "$MODEL_PATH" \
+        --num_samples $NS --seq_length 2048 \
+        --alpha 1.0 --beta 1.0 \
+        $calib_chat_flag \
+        --output "$BASE" \
+        $( [ "$SIZE" = "32b" ] && /usr/bin/echo "--device auto" )
+    fi
+    if [ ! -f "$VAR" ]; then
+      /usr/bin/echo "[calib] deriving per-head variant $VAR  (α=$ALPHA β=$BETA, no_huk + no_halfpair)"
+      # --no_head_uniform_k: keep per-head granularity (override Qwen3 auto-HUK).
+      # No --half_pair_max_k: smoothkv runtime kernel applies post-RoPE, so the
+      # i/i+d/2 pair-equal constraint (needed for fused-pre-RoPE) is unnecessary.
+      $PY scripts/make_alpha_variants.py \
+        --base "$BASE" --alphas $ALPHA --betas $BETA --no_head_uniform_k
+      # make_alpha_variants writes the alpha-loop file as `..._a${AS}.pt` and
+      # the betas-loop file as `..._a${base_α}_b${BS}.pt`. Base α=1, so the
+      # betas-loop output (which has both α and β in name) is what we want.
+      EXPECTED_BETA_OUT=$(/usr/bin/dirname "$BASE")/$(/usr/bin/basename "$BASE" .pt)_a1_b${BS}.pt
+      [ -f "$EXPECTED_BETA_OUT" ] && /bin/mv "$EXPECTED_BETA_OUT" "$VAR" || true
+    fi
+    calib_path="$VAR"
+    # Use the runtime smoothkv kernel (NOT smoothkv_fused) so per-head s_K applies.
+    METHOD_ARGS="--kv_quant_method smoothkv --calib_path $calib_path --bits 4 --group_size 128"
+    ;;
+  *) /usr/bin/echo "variant must be bf16|fp8|pertoken|smkv|smkv_per_head"; exit 1 ;;
 esac
 
 SAMPLES=logs/${TASK}_${MODEL_TAG}_${VARIANT_TAG}_chat_vllm_samples.json
