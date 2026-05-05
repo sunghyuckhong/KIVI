@@ -65,7 +65,12 @@ PY="${PY:-./.venv/bin/python}"
 # pass2 is redundant and we skip it (pass1 stands).
 MODEL_MAX_LEN=$($PY -c "from transformers import AutoConfig; \
 print(AutoConfig.from_pretrained('$MODEL_PATH', trust_remote_code=True).max_position_embeddings)")
-if [ "$MODEL_MAX_LEN" -ge 32768 ]; then PASS2_MG=32768; else PASS2_MG=$((MODEL_MAX_LEN / 2)); fi
+# Use MG=32k only when model context is STRICTLY larger than 32k (room for
+# the prompt budget). Otherwise PASS2_MG = model_max_len / 2 keeps room for
+# both prompt + generation within the model's context window.
+# Examples: Qwen3 (40960) → 32768; Mistral-7B-Instruct-v0.2 (32768) → 16384;
+# Llama-3-8B (8192) → 4096.
+if [ "$MODEL_MAX_LEN" -gt 32768 ]; then PASS2_MG=32768; else PASS2_MG=$((MODEL_MAX_LEN / 2)); fi
 if [ "$PASS2_MG" -lt 4096 ]; then PASS1_MG=$PASS2_MG; else PASS1_MG=4096; fi
 MML4=$((PASS1_MG + PROMPT_BUDGET))
 MML32=$((PASS2_MG + PROMPT_BUDGET))
