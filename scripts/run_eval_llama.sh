@@ -106,20 +106,34 @@ case "$VARIANT" in
     ;;
   smkv_per_channel)
     # Per-(layer, kv_head, head_dim) UNIQUE smoothing factors via runtime
-    # smoothkv kernel (post-RoPE). Llama-3 has no q_norm/k_norm, so the
-    # head-uniform constraint that fused-Qwen3 needs doesn't apply here.
+    # smoothkv kernel (post-RoPE). Llama-3/Mistral have no q_norm/k_norm,
+    # so the head-uniform constraint that fused-Qwen3 needs doesn't apply.
     # Runtime kernel applies post-RoPE so half-pair constraint isn't needed.
+    #
+    # CHAT_CALIB defaults to 1 — calib generation uses --apply_chat_template
+    # to match the eval-time prompt distribution (we always run eval with
+    # chat template applied). Use CHAT_CALIB=0 for raw-text calibration.
+    CHAT_CALIB="${CHAT_CALIB:-1}"
     fmt() { /usr/bin/awk -v v="$1" 'BEGIN{ if(v==int(v)) printf "%d", v; else printf "%g", v; }'; }
     AS=$(fmt $ALPHA); BS=$(fmt $BETA)
-    BASE="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}.pt"
-    VAR="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_a${AS}_b${BS}_per_channel.pt"
-    VARIANT_TAG="smoothkv_g128_perc_ns${NS}_a${AS}_b${BS}_per_channel"
+    if [ "$CHAT_CALIB" = "1" ]; then
+      BASE="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_chat.pt"
+      VAR="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_chat_a${AS}_b${BS}_per_channel.pt"
+      VARIANT_TAG="smoothkv_g128_perc_ns${NS}_chat_a${AS}_b${BS}_per_channel"
+      calib_chat_flag="--apply_chat_template"
+    else
+      BASE="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}.pt"
+      VAR="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_a${AS}_b${BS}_per_channel.pt"
+      VARIANT_TAG="smoothkv_g128_perc_ns${NS}_a${AS}_b${BS}_per_channel"
+      calib_chat_flag=""
+    fi
     if [ ! -f "$BASE" ]; then
-      /usr/bin/echo "[calib] generating base $BASE  (n_s=$NS)"
+      /usr/bin/echo "[calib] generating base $BASE  (n_s=$NS, $( [ -n "$calib_chat_flag" ] && /usr/bin/echo chat-calib || /usr/bin/echo raw-calib ))"
       CUDA_VISIBLE_DEVICES=$GPUS $PY run_smoothkv_calibrate.py \
         --model "$MODEL_PATH" \
         --num_samples $NS --seq_length 2048 \
         --alpha 1.0 --beta 1.0 \
+        $calib_chat_flag \
         --output "$BASE" $( [ "$TP" -gt 1 ] && /usr/bin/echo "--device auto" )
     fi
     if [ ! -f "$VAR" ]; then
