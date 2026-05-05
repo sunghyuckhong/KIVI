@@ -3,17 +3,19 @@
 
 After install_method() patches Qwen3Attention.forward, vLLM traces through
 the patched code and inductor emits a `computation_graph.py` with source-line
-annotations pointing back to the original Python files. We can grep that
-file to confirm our quant kernels are in the captured graph (i.e., the patch
-wasn't silently bypassed by a stale compile cache, plugin override, or
-graph break).
+annotations pointing back to the original Python files. We grep that file
+for ACTUAL op invocations (`torch.ops.vllm_kv_quant.<op>(`) — not just the
+op name as a string, because inductor's comment annotations like
+`# File: /KIVI/quant/new_pack.py:38 in quant_and_pack_vcache, code: ...`
+also contain the op name and would false-positive a substring match.
 
 Per-variant signatures we look for:
-    bf16/fp16     → NO quant calls (baseline; must not see fake_quantize_*)
-    fp8           → fake_quantize_dequantize_fp8
-    pertoken      → quant_and_pack_vcache (the int4 kernel)
-    smoothkv      → quant_and_pack_vcache (post-smoothing K/V quant)
-    smoothkv_fused → quant_and_pack_vcache (after k_norm γ fusion)
+    bf16/fp16     → NO actual quant op invocations (baseline)
+    fp8           → vllm_kv_quant.fake_quantize_dequantize_fp8(
+    pertoken      → vllm_kv_quant.{quant_and_pack,unpack_and_dequant}_vcache(
+    smoothkv      → same as pertoken (the runtime kernel calls
+                    fake_quantize_pertoken which dispatches to those ops)
+    smoothkv_fused → same as pertoken (post-fusion the layer is plain pertoken)
 
 Returns 0 if all expected signatures present and no forbidden ones; 1 otherwise.
 
@@ -24,21 +26,31 @@ Usage:
 import argparse
 import glob
 import os
+import re
 import sys
 
 
+# Each value is a regex that must match at least one ACTUAL op invocation
+# (i.e., the op name immediately followed by `(`). This excludes inductor's
+# `# in <op>,` comment annotations.
 EXPECTED = {
     "bf16":           [],
     "fp16":           [],
-    "fp8":            ["fake_quantize_dequantize_fp8"],
-    "pertoken":       ["quant_and_pack_vcache", "unpack_and_dequant_vcache"],
-    "smoothkv":       ["quant_and_pack_vcache"],
-    "smoothkv_fused": ["quant_and_pack_vcache"],
+    "fp8":            [r"vllm_kv_quant\.fake_quantize_dequantize_fp8\("],
+    "pertoken":       [r"vllm_kv_quant\.quant_and_pack_vcache\(",
+                       r"vllm_kv_quant\.unpack_and_dequant_vcache\("],
+    "smoothkv":       [r"vllm_kv_quant\.quant_and_pack_vcache\(",
+                       r"vllm_kv_quant\.unpack_and_dequant_vcache\("],
+    "smoothkv_fused": [r"vllm_kv_quant\.quant_and_pack_vcache\(",
+                       r"vllm_kv_quant\.unpack_and_dequant_vcache\("],
 }
 
+# For baselines we must NOT see any actual quant op invocations. Catches
+# the case where a stale compile cache or plugin override silently quantizes
+# a "bf16" run.
 FORBIDDEN = {
-    "bf16": ["quant_and_pack", "fake_quantize"],
-    "fp16": ["quant_and_pack", "fake_quantize"],
+    "bf16": [r"vllm_kv_quant\.\w+\("],
+    "fp16": [r"vllm_kv_quant\.\w+\("],
 }
 
 
@@ -51,6 +63,10 @@ def find_graph_files(cache_root: str):
     for p in patterns:
         files.extend(glob.glob(p))
     return files
+
+
+def _count(pattern: str, content: str) -> int:
+    return len(re.findall(pattern, content))
 
 
 def verify(variant: str, cache_root: str, verbose: bool = True) -> bool:
@@ -74,18 +90,27 @@ def verify(variant: str, cache_root: str, verbose: bool = True) -> bool:
             content = open(gf).read()
         except OSError:
             continue
-        missing = [s for s in expected if s not in content]
-        present_forbidden = [s for s in forbidden if s in content]
+        # actual call counts per expected op
+        op_counts = {pat: _count(pat, content) for pat in expected}
+        forbidden_counts = {pat: _count(pat, content) for pat in forbidden}
+        missing = [pat for pat, n in op_counts.items() if n == 0]
+        present_forbidden = [pat for pat, n in forbidden_counts.items() if n > 0]
         ok = not missing and not present_forbidden
         if verbose:
             tag = "[PASS]" if ok else "[FAIL]"
-            print(f"[verify-graph] {tag} variant={variant} graph={gf}")
-            if expected:
-                print(f"  expected:  {expected}")
+            # Strip the regex escapes (`\.`, `\(`) for the human-readable summary.
+            def _short(pat):
+                base = pat.split(".")[-1]
+                return base.replace("\\(", "").replace("\\.", ".")
+            ops_str = " ".join(f"{_short(p)}={n}" for p, n in op_counts.items())
+            print(f"[verify-graph] {tag} variant={variant} graph={gf}"
+                  + (f" ops=({ops_str})" if expected else ""))
             if missing:
-                print(f"  MISSING:   {missing}")
+                print(f"  MISSING (no ACTUAL op calls in graph): {missing}")
             if present_forbidden:
-                print(f"  FORBIDDEN PRESENT (silent quant on baseline!): {present_forbidden}")
+                print(f"  FORBIDDEN PRESENT (silent quant on baseline!): "
+                      f"{[p for p in present_forbidden]} "
+                      f"(counts: { {p: forbidden_counts[p] for p in present_forbidden} })")
         if not ok:
             all_ok = False
     return all_ok
