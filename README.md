@@ -20,7 +20,7 @@ two-pass adaptive eval with a graph-verification trust gate at each pass.
 |---|---|---|
 | `bf16` / `fp8` / `pertoken` | as named | n/a |
 | `smkv` | `smoothkv_fused` (HUK auto-on for q-norm models, halfpair) | per-(layer, head_dim) — shared across heads → 36 × 128 = **4,608** unique values |
-| `smkv_per_head` | `smoothkv` runtime kernel, `--no_head_uniform_k`, no halfpair | per-(layer, kv_head, head_dim) → 36 × 8 × 128 = **36,864** unique values |
+| `smkv_per_channel` | `smoothkv` runtime kernel, `--no_head_uniform_k`, no halfpair | per-(layer, kv_head, head_dim) → 36 × 8 × 128 = **36,864** unique values |
 
 ## Tasks
 
@@ -170,7 +170,7 @@ Example overrides:
 
 ```bash
 make run-qwen3-8b VARIANTS="bf16 smkv"            # 2 methods only
-make run-qwen3-8b VARIANTS="smkv_per_head"        # per-(head, channel) smoothing (Qwen3 only)
+make run-qwen3-8b VARIANTS="smkv_per_channel"        # per-(head, channel) smoothing (Qwen3 only)
 make run-llama TASKS=gsm8k_cot                     # 1 task only
 make run-qwen3-32b GPUS=0,1,2,3                    # explicit 2-stream pool
 make run-qwen3-8b ALPHA=0.5 BETA=0.5               # different SmoothKV α/β

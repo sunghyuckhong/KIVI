@@ -8,7 +8,7 @@
 # Usage:
 #   bash scripts/run_eval_qwen3.sh \
 #       --size 8b|32b \
-#       --variant bf16|fp8|pertoken|smkv|smkv_per_head \
+#       --variant bf16|fp8|pertoken|smkv|smkv_per_channel \
 #       --task gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot \
 #       [--ns 512]                     # SmoothKV calib sample count
 #       [--alpha 1.0] [--beta 1.0]     # SmoothKV α/β
@@ -60,7 +60,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -z "$SIZE" ] || [ -z "$VARIANT" ] || [ -z "$TASK" ] && {
-  /usr/bin/echo "Required: --size {8b|32b|30b-a3b} --variant {bf16|fp8|pertoken|smkv|smkv_per_head} --task {gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot}"
+  /usr/bin/echo "Required: --size {8b|32b|30b-a3b} --variant {bf16|fp8|pertoken|smkv|smkv_per_channel} --task {gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot}"
   exit 1
 }
 
@@ -140,7 +140,7 @@ case "$VARIANT" in
     calib_path="$VAR"
     METHOD_ARGS="--kv_quant_method smoothkv_fused --calib_path $calib_path --bits 4 --group_size 128"
     ;;
-  smkv_per_head)
+  smkv_per_channel)
     # Per-(layer, kv_head, head_dim) UNIQUE smoothing factors. For Qwen3-8B
     # that's 36 layers × 8 kv_heads × 128 = 36864 unique s_K values (and
     # same for s_V) — versus the head-uniform `smkv` variant which shares
@@ -161,13 +161,13 @@ case "$VARIANT" in
     AS=$(fmt $ALPHA); BS=$(fmt $BETA)
     if [ "$CHAT_CALIB" -eq 1 ]; then
       BASE="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_chat.pt"
-      VAR="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_chat_a${AS}_b${BS}_perhead.pt"
-      VARIANT_TAG="smoothkv_g128_perc_ns${NS}_chat_a${AS}_b${BS}_perhead"
+      VAR="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_chat_a${AS}_b${BS}_per_channel.pt"
+      VARIANT_TAG="smoothkv_g128_perc_ns${NS}_chat_a${AS}_b${BS}_per_channel"
       calib_chat_flag="--apply_chat_template"
     else
       BASE="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}.pt"
-      VAR="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_a${AS}_b${BS}_perhead.pt"
-      VARIANT_TAG="smoothkv_g128_perc_ns${NS}_a${AS}_b${BS}_perhead"
+      VAR="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_a${AS}_b${BS}_per_channel.pt"
+      VARIANT_TAG="smoothkv_g128_perc_ns${NS}_a${AS}_b${BS}_per_channel"
       calib_chat_flag=""
     fi
     if [ ! -f "$BASE" ]; then
@@ -197,7 +197,7 @@ case "$VARIANT" in
     # Use the runtime smoothkv kernel (NOT smoothkv_fused) so per-head s_K applies.
     METHOD_ARGS="--kv_quant_method smoothkv --calib_path $calib_path --bits 4 --group_size 128"
     ;;
-  *) /usr/bin/echo "variant must be bf16|fp8|pertoken|smkv|smkv_per_head"; exit 1 ;;
+  *) /usr/bin/echo "variant must be bf16|fp8|pertoken|smkv|smkv_per_channel"; exit 1 ;;
 esac
 
 SAMPLES=logs/${TASK}_${MODEL_TAG}_${VARIANT_TAG}_chat_vllm_samples.json
