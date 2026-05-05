@@ -32,7 +32,7 @@ SHELL := /bin/bash
 VLLM_FORK_URL     ?= https://github.com/sunghyuckhong/vllm-compression-part.git
 VLLM_FORK_PATH    ?= /workspace/sunghyuck/vllm-compression-part
 VLLM_FORK_BRANCH  ?= kv_cache_quant
-VLLM_FORK_COMMIT  ?= 675ba44c0a
+VLLM_FORK_COMMIT  ?= d4f2eeb3b
 
 # Torch version pinned by the vllm fork's pyproject.toml. We install torch
 # from the PyTorch CUDA-12.8 / CUDA-13.0 wheel index *before* the vllm fork

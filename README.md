@@ -34,7 +34,7 @@ two-pass adaptive eval with a graph-verification trust gate at each pass.
 
 | Family | Sizes tested | Tensor parallel |
 |--------|--------------|:---------------:|
-| Qwen3 | 8B, 32B | 1 / 2 |
+| Qwen3 | 8B, 32B, 30B-A3B (MoE) | 1 / 2 / 2 |
 | Llama-3 | 8B-Instruct (default), any HF id | 1 (8B) / 2-4 (70B) |
 | Mistral | 7B-Instruct-v0.2 | 1 |
 | EXAONE-4.5 | 33B | 2 |
@@ -123,8 +123,9 @@ The simplest entry point — sweeps a single (model, family) over all
 ```bash
 make run-qwen3-8b               # 1 GPU per cell, all idle GPUs used
 make run-qwen3-32b              # 2 GPUs per cell (TP=2)
+make run-qwen3-30b-a3b          # 2 GPUs per cell (TP=2; MoE, ~3B active)
 make run-llama                  # default LLAMA_MODEL=Meta-Llama-3-8B-Instruct
-make run-mistral
+make run-mistral                # default Mistral-7B-Instruct-v0.2
 make run-exaone                 # TP=2
 
 make run-all                    # qwen3-8b + llama + mistral
@@ -170,7 +171,8 @@ Example overrides:
 
 ```bash
 make run-qwen3-8b VARIANTS="bf16 smkv"            # 2 methods only
-make run-qwen3-8b VARIANTS="smkv_per_channel"        # per-(head, channel) smoothing (Qwen3 only)
+make run-qwen3-8b VARIANTS="smkv_per_channel"        # per-(head, channel) smoothing (Qwen3 + Llama-3 + Mistral)
+make run-qwen3-8b VARIANTS="..." NS=1024             # bump SmoothKV calib sample count
 make run-llama TASKS=gsm8k_cot                     # 1 task only
 make run-qwen3-32b GPUS=0,1,2,3                    # explicit 2-stream pool
 make run-qwen3-8b ALPHA=0.5 BETA=0.5               # different SmoothKV α/β
