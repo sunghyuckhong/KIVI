@@ -38,8 +38,11 @@ done
   exit 1
 }
 
-# Derive a short tag from model path (e.g. meta-llama/Meta-Llama-3-8B-Instruct → meta-llama-3-8b-instruct)
-MODEL_TAG=$(/usr/bin/echo "${MODEL_PATH,,}" | /usr/bin/tr '/' '\n' | /usr/bin/tail -1 | /usr/bin/sed 's/^meta-//')
+# Derive a short tag from model path. MUST match what run_eval_vllm.py's
+# output_name() produces (model.rstrip('/').split('/')[-1].lower()) so the
+# runner-built RESULTS path matches lm-eval's actual output file. Don't
+# strip 'meta-' or any other prefix.
+MODEL_TAG=$(/usr/bin/echo "${MODEL_PATH,,}" | /usr/bin/tr '/' '\n' | /usr/bin/tail -1)
 
 case "$TASK" in
   gsm8k_cot|minerva_math500) PROMPT_BUDGET=1536 ;;
