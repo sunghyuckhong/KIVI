@@ -7,7 +7,7 @@
 # Usage:
 #   bash scripts/run_eval_llama.sh \
 #       --model meta-llama/Meta-Llama-3-8B-Instruct \
-#       --variant bf16|fp8|pertoken|smkv \
+#       --variant bf16|fp8|pertoken|smkv|smkv_per_channel \
 #       --task gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot \
 #       [--ns 512] [--alpha 1.0] [--beta 1.0] \
 #       [--gpus 0]
@@ -34,7 +34,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -z "$MODEL_PATH" ] || [ -z "$VARIANT" ] || [ -z "$TASK" ] && {
-  /usr/bin/echo "Required: --model HF_PATH --variant {bf16|fp8|pertoken|smkv} --task {gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot}"
+  /usr/bin/echo "Required: --model HF_PATH --variant {bf16|fp8|pertoken|smkv|smkv_per_channel} --task {gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot}"
   exit 1
 }
 
@@ -95,6 +95,33 @@ case "$VARIANT" in
         --pair_max_k --no_head_uniform_k
     fi
     METHOD_ARGS="--kv_quant_method smoothkv_fused --calib_path $VAR --bits 4 --group_size 128"
+    ;;
+  smkv_per_channel)
+    # Per-(layer, kv_head, head_dim) UNIQUE smoothing factors via runtime
+    # smoothkv kernel (post-RoPE). Llama-3 has no q_norm/k_norm, so the
+    # head-uniform constraint that fused-Qwen3 needs doesn't apply here.
+    # Runtime kernel applies post-RoPE so half-pair constraint isn't needed.
+    fmt() { /usr/bin/awk -v v="$1" 'BEGIN{ if(v==int(v)) printf "%d", v; else printf "%g", v; }'; }
+    AS=$(fmt $ALPHA); BS=$(fmt $BETA)
+    BASE="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}.pt"
+    VAR="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_a${AS}_b${BS}_per_channel.pt"
+    VARIANT_TAG="smoothkv_g128_perc_ns${NS}_a${AS}_b${BS}_per_channel"
+    if [ ! -f "$BASE" ]; then
+      /usr/bin/echo "[calib] generating base $BASE  (n_s=$NS)"
+      CUDA_VISIBLE_DEVICES=$GPUS $PY run_smoothkv_calibrate.py \
+        --model "$MODEL_PATH" \
+        --num_samples $NS --seq_length 2048 \
+        --alpha 1.0 --beta 1.0 \
+        --output "$BASE" $( [ "$TP" -gt 1 ] && /usr/bin/echo "--device auto" )
+    fi
+    if [ ! -f "$VAR" ]; then
+      /usr/bin/echo "[calib] deriving per-channel variant $VAR  (α=$ALPHA β=$BETA, no HUK, no halfpair)"
+      $PY scripts/make_alpha_variants.py \
+        --base "$BASE" --alphas $ALPHA --betas $BETA --no_head_uniform_k
+      EXPECTED_BETA_OUT=$(/usr/bin/dirname "$BASE")/$(/usr/bin/basename "$BASE" .pt)_a1_b${BS}.pt
+      [ -f "$EXPECTED_BETA_OUT" ] && /bin/mv "$EXPECTED_BETA_OUT" "$VAR" || true
+    fi
+    METHOD_ARGS="--kv_quant_method smoothkv --calib_path $VAR --bits 4 --group_size 128"
     ;;
   *) /usr/bin/echo "variant invalid"; exit 1 ;;
 esac
