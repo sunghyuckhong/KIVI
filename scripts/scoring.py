@@ -1,27 +1,67 @@
-"""Task-specific scorers for adaptive_pass2 merged samples.
+"""Re-score adaptive_pass2 merged samples by replaying lm-eval's own filter
+chain. Reads ``filter_list`` from the task YAML, instantiates each component
+via ``lm_eval.filters.get_filter``, applies them in sequence to the merged
+(resps, docs), and aggregates with ``exact_match_hf_evaluate`` using the
+options from ``metric_list``. The result keys (``"exact_match,strict-match"``,
+``"exact_match,flexible-extract"`` etc.) match what lm-eval would have written
+if it had scored the merged set itself.
 
-We re-score in-process (instead of round-tripping through lm-eval's filter
-chain) to avoid version-skew bugs where lm-eval upgrades silently change
-extraction regexes between releases.
+Why we re-score at all: pass-1 (``run_eval_vllm.py``) goes through lm-eval's
+``simple_evaluate`` and lands a filtered + scored ``_results.json``. Pass-2
+re-generates only the truncated subset at MG=32k and merges those new
+responses back into the pass-1 sample list — at which point lm-eval has no
+public hook to "score this list of pre-generated samples." This module fills
+that gap.
 
-Each scorer takes ``items``: a list of lm-eval sample dicts (with ``doc``
-and ``resps``) and returns a flat ``{metric_name: float}`` dict matching
-lm-eval's own metric naming so the downstream tables can stay schema-stable.
+Why YAML instead of ``task.apply_filters``: ``ConfigurableTask`` downloads
+the dataset upfront (gpqa's is gated on HF), so constructing the task is
+heavy and credential-bound. Reading the YAML and instantiating filters via
+``lm_eval.filters`` needs no dataset access. The merged sample dicts already
+carry post-``process_docs`` ``doc`` fields (with ``choices`` etc.), so the
+filters that consult docs (``MultiChoiceRegexFilter``) work as-is.
 
-Available scorers (looked up via ``SCORERS[task_name]``):
-  - ``minerva_math500``           → math_verify (sympy boxed-aware)
-  - ``gsm8k_cot`` / ``gsm8k_32k`` → strict + flexible exact-match on numbers
-  - ``gpqa_main_cot_n_shot``  → flexible-extract on (A)/(B)/(C)/(D)
+Past trap: an earlier hand-rolled regex scorer for gpqa diverged from
+lm-eval's filter (~9pt loss on Qwen3 thinking-mode). Delegating to lm-eval's
+own filter classes prevents that drift.
 """
-import re
+from pathlib import Path
+
+import yaml
+import lm_eval
+from lm_eval.filters import get_filter
+from lm_eval.api.metrics import exact_match_hf_evaluate
+
+
+LMEVAL_TASKS_DIR = Path(lm_eval.__file__).parent / "tasks"
+
+
+# lm-eval YAMLs use a custom `!function` tag (e.g.
+# `process_docs: !function utils.process_docs`) to point at Python callables.
+# We don't execute those — we only need filter_list / metric_list — so a
+# tolerant loader that turns `!function foo` into the string "foo" suffices.
+class _LMEvalLoader(yaml.SafeLoader):
+    pass
+
+
+def _construct_function_tag(loader, node):
+    return f"!function {node.value}"
+
+
+_LMEvalLoader.add_constructor("!function", _construct_function_tag)
+
+
+# Cache resolved task configs: resolving a task name walks every YAML under
+# lm_eval/tasks/ (~hundreds of files) so without caching, scoring N cells does
+# N full walks.
+_CFG_CACHE: dict[str, dict] = {}
 
 
 def get_raw_text(it):
     """Pull the response string out of an lm-eval sample dict.
 
-    lm-eval stores responses as ``resps``: it can be a single string, a
-    flat list of strings, or a nested ``[[str]]`` (chat-task format).
-    Normalize all three into one string.
+    lm-eval stores responses as ``resps``: a single string, a flat list, or a
+    nested ``[[str]]`` (chat-task format). Normalize all three into one string.
+    Kept as a public helper for ``score_minerva_math500``.
     """
     r = it.get("resps") or [""]
     if isinstance(r, list) and r and isinstance(r[0], list):
@@ -31,11 +71,119 @@ def get_raw_text(it):
     return r if isinstance(r, str) else ""
 
 
+def _find_task_yaml(task_name):
+    for p in LMEVAL_TASKS_DIR.rglob("*.yaml"):
+        try:
+            cfg = yaml.load(open(p), Loader=_LMEvalLoader)
+        except Exception:
+            continue
+        if isinstance(cfg, dict) and cfg.get("task") == task_name:
+            return p
+    raise FileNotFoundError(f"no lm-eval YAML for task {task_name!r} under {LMEVAL_TASKS_DIR}")
+
+
+def _load_full_config(yaml_path):
+    """Load a task YAML and recursively merge any ``include:`` directives.
+
+    lm-eval allows includes without a .yaml extension (e.g. gpqa's
+    ``include: _gpqa_cot_n_shot_yaml``)."""
+    cfg = yaml.load(open(yaml_path), Loader=_LMEvalLoader)
+    inc = cfg.pop("include", None)
+    if not inc:
+        return cfg
+    parent_dir = Path(yaml_path).parent
+    candidates = [parent_dir / inc, parent_dir / f"{inc}.yaml", parent_dir / f"{inc}.yml"]
+    for c in candidates:
+        if c.exists():
+            base = _load_full_config(c)
+            base.update(cfg)
+            return base
+    raise FileNotFoundError(f"include {inc!r} (referenced from {yaml_path}) not found")
+
+
+def _build_filter_chain(filter_list_entry):
+    """Turn one ``filter_list`` entry (``{name, filter: [components]}``) into
+    a callable ``f(resps, docs) -> filtered_resps``."""
+    components = []
+    for component_cfg in filter_list_entry["filter"]:
+        kw = dict(component_cfg)
+        fn = kw.pop("function")
+        components.append(get_filter(fn)(**kw))
+
+    def chain(resps, docs):
+        for f in components:
+            resps = f.apply(resps, docs)
+        return resps
+
+    return chain
+
+
+def _resps_for(it):
+    r = it.get("resps") or [""]
+    if isinstance(r, list) and r and isinstance(r[0], list):
+        return list(r[0])
+    return list(r) if isinstance(r, list) else [r]
+
+
+def _target_for(it, task_cfg):
+    """Pass-1 populates ``target``; fall back to the YAML's doc_to_target only
+    for the trivial "answer" form so we don't reimplement Jinja here."""
+    t = it.get("target")
+    if t:
+        return str(t)
+    d2t = task_cfg.get("doc_to_target")
+    if d2t == "answer":
+        return str(it["doc"].get("answer", ""))
+    raise ValueError(
+        f"sample lacks `target` and doc_to_target={d2t!r} is not a literal field "
+        f"this helper handles; pass-1 should have populated `target`."
+    )
+
+
+def score_via_lm_eval(items, task_name):
+    """Apply the lm-eval task's filter chain + metric to merged samples.
+
+    Returns a dict shaped like lm-eval's own results: one ``{metric},{filter}``
+    entry per filter in ``filter_list``, plus an ``{metric}_n,{filter}`` count.
+    """
+    if task_name not in _CFG_CACHE:
+        _CFG_CACHE[task_name] = _load_full_config(_find_task_yaml(task_name))
+    cfg = _CFG_CACHE[task_name]
+    metric_cfg = cfg["metric_list"][0]  # the three tasks we care about are single-metric
+    metric_name = metric_cfg["metric"]
+    em_kwargs = {
+        "ignore_case":        metric_cfg.get("ignore_case", False),
+        "ignore_punctuation": metric_cfg.get("ignore_punctuation", False),
+        "ignore_numbers":     metric_cfg.get("ignore_numbers", False),
+        "regexes_to_ignore":  metric_cfg.get("regexes_to_ignore"),
+    }
+
+    resps = [_resps_for(it) for it in items]
+    docs = [it["doc"] for it in items]
+    targets = [_target_for(it, cfg) for it in items]
+
+    out = {}
+    for entry in cfg["filter_list"]:
+        fname = entry["name"]
+        chain = _build_filter_chain(entry)
+        # After RegexFilter the shape is List[List[str]]; after TakeFirstFilter
+        # it's a `map` object yielding str — materialize and accept either form.
+        filtered = list(chain([list(r) for r in resps], docs))
+        preds = [(f if isinstance(f, str) else (f[0] if isinstance(f, list) and f else "")) for f in filtered]
+        em = exact_match_hf_evaluate(predictions=preds, references=targets, **em_kwargs)
+        out[f"{metric_name},{fname}"] = float(em["exact_match"])
+        out[f"{metric_name}_n,{fname}"] = len(items)
+    return out
+
+
 def score_minerva_math500(items):
     """math_verify-based exact match for Minerva-MATH500.
 
     math_verify parses both gold and prediction with sympy and checks
-    boxed-aware mathematical equivalence (so "1/2" == "0.5" etc.).
+    boxed-aware mathematical equivalence (so "1/2" == "0.5" etc.). lm-eval's
+    minerva task uses the same `math_verify` package for the same purpose, so
+    this is delegation-equivalent without the dataset-download cost of going
+    through ConfigurableTask.
     """
     from math_verify import parse, verify
     n_correct = 0
@@ -52,74 +200,17 @@ def score_minerva_math500(items):
             "math_verify_n,none": len(items)}
 
 
-_NUM_RE = re.compile(r"-?\d+(?:,\d{3})*(?:\.\d+)?")
-
-
-def _extract_strict_gsm8k(text: str):
-    """Strict-match extraction: \\boxed{}, then "answer is X", then GSM8K-style "#### X"."""
-    m = re.findall(r"\\boxed\{([^{}]+)\}", text)
-    if m:
-        nums = _NUM_RE.findall(m[-1])
-        if nums:
-            return nums[-1].replace(",", "")
-    m = re.search(r"answer is[:\s]*\$?(-?\d[\d,]*(?:\.\d+)?)", text, re.IGNORECASE)
-    if m:
-        return m.group(1).replace(",", "")
-    m = re.search(r"####\s*(-?\d[\d,]*(?:\.\d+)?)", text)
-    if m:
-        return m.group(1).replace(",", "")
-    return None
-
-
-def _extract_flex_gsm8k(text: str):
-    """Flexible extraction: last number anywhere in the response."""
-    nums = _NUM_RE.findall(text)
-    return nums[-1].replace(",", "") if nums else None
-
-
 def score_gsm8k(items):
-    """Strict + flexible exact-match for GSM8K-style numeric answers."""
-    n_strict = 0
-    n_flex = 0
-    for it in items:
-        resp = get_raw_text(it)
-        gold = it["doc"].get("answer", "")
-        # GSM8K gold is "... #### N" — take the last number.
-        g = _NUM_RE.findall(gold)
-        gold_num = g[-1].replace(",", "") if g else gold.strip()
-        s = _extract_strict_gsm8k(resp)
-        f = _extract_flex_gsm8k(resp)
-        if s is not None and s == gold_num:
-            n_strict += 1
-        if f is not None and f == gold_num:
-            n_flex += 1
-    return {"exact_match,strict-match": n_strict / len(items),
-            "exact_match,flexible-extract": n_flex / len(items),
-            "exact_match_n,strict-match": len(items),
-            "exact_match_n,flexible-extract": len(items)}
+    return score_via_lm_eval(items, "gsm8k_cot")
 
 
 def score_gpqa(items):
-    """Flexible-extract for GPQA: pick the last (A)/(B)/(C)/(D) letter."""
-    n_flex = 0
-    for it in items:
-        resp = get_raw_text(it)
-        gold = str(it["doc"].get("answer", "") or it["doc"].get("Correct Answer", "") or "").strip()
-        # gpqa_main_cot_n_shot answers look like "(A)" "(B)" "(C)" "(D)".
-        m = re.findall(r"\b\(?([A-D])\)?", resp.split("\n")[-1])
-        if not m:
-            m = re.findall(r"\b\(([A-D])\)", resp)
-        pred = m[-1] if m else None
-        gold_letter = gold[1] if gold.startswith("(") and len(gold) >= 3 else gold
-        if pred is not None and pred.upper() == gold_letter.upper():
-            n_flex += 1
-    return {"exact_match,flexible-extract": n_flex / len(items),
-            "exact_match_n,flexible-extract": len(items)}
+    return score_via_lm_eval(items, "gpqa_main_cot_n_shot")
 
 
 SCORERS = {
-    "minerva_math500": score_minerva_math500,
-    "gsm8k_32k": score_gsm8k,
-    "gsm8k_cot": score_gsm8k,
+    "minerva_math500":      score_minerva_math500,
+    "gsm8k_32k":            score_gsm8k,
+    "gsm8k_cot":            score_gsm8k,
     "gpqa_main_cot_n_shot": score_gpqa,
 }
