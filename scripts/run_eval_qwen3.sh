@@ -65,7 +65,10 @@ done
 }
 
 case "$SIZE" in 8b|32b|30b-a3b) ;; *) /usr/bin/echo "size must be 8b|32b|30b-a3b"; exit 1 ;; esac
-MODEL_PATH="Qwen/Qwen3-${SIZE^^}"
+case "$SIZE" in
+  30b-a3b) MODEL_PATH="Qwen/Qwen3-30B-A3B-Instruct-2507" ;;
+  *)       MODEL_PATH="Qwen/Qwen3-${SIZE^^}" ;;
+esac
 MODEL_TAG="qwen3-${SIZE}"
 
 case "$TASK" in
