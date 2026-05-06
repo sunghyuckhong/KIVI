@@ -253,15 +253,17 @@ def main():
 
 
     # Verify the FX graph that vLLM compiled actually contained our patched kernels.
+    # Every code path here MUST emit either `[verify-graph] [PASS]` or `[verify-graph] [FAIL]`
+    # so the shell runner gate can distinguish a true pass from a swallowed exception.
     try:
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts"))
         from verify_compiled_graph import verify as _verify_graph
         cache_root = os.environ.get("VLLM_CACHE_ROOT") or f"/tmp/vllm_cache_{os.getpid()}"
         ok = _verify_graph(args.kv_quant_method, cache_root, verbose=True)
         if not ok:
-            print("[WARN] GRAPH-VERIFY FAILED -- patches may have been silently bypassed!")
+            print("[verify-graph] [FAIL] post-hoc verification reported FAIL")
     except Exception as e:
-        print(f"[verify-graph] could not run post-hoc check: {e}")
+        print(f"[verify-graph] [FAIL] exception during post-hoc check: {e}")
 
 
 if __name__ == "__main__":

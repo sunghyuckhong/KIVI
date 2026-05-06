@@ -167,8 +167,8 @@ if [ "$FORCE" = "1" ] || [ ! -f "$SAMPLES" ] || [ ! -f "$RESULTS" ]; then
       --max_gen_toks $PASS1_MG --max_model_len $MML4 \
       --max_num_seqs $MNS_P1 --batch_size $MNS_P1 --tp $TP \
       --log_samples 2>&1 | /usr/bin/tee "$P1_LOG"
-  /usr/bin/grep -q "\[verify-graph\]" "$P1_LOG" || { /usr/bin/echo "ERROR: pass1 NO stamp"; exit 2; }
-  /usr/bin/grep "\[verify-graph\]" "$P1_LOG" | /usr/bin/grep -qE "FAIL" && { /usr/bin/echo "ERROR: pass1 FAIL"; exit 2; }
+  /usr/bin/grep -qE "\[verify-graph\] (\[PASS\]|✅[[:space:]]*PASS)" "$P1_LOG" \
+    || { /usr/bin/echo "ERROR: pass1 no explicit verify-graph PASS stamp"; exit 2; }
   /usr/bin/echo "[pass1] verify-graph: PASS"
 else
   /usr/bin/echo "[pass1] SKIP — samples + results exist (set FORCE=1 to override)"
@@ -186,8 +186,8 @@ elif [ "$FORCE" = "1" ] || [ ! -f "$ADAPTIVE" ]; then
       --pass1_mg $PASS1_MG --pass2_mg $PASS2_MG \
       --max_model_len $MML32 --max_num_seqs $MNS_P2 --tp $TP \
       2>&1 | /usr/bin/tee "$P2_LOG"
-  /usr/bin/grep -q "\[verify-graph\]" "$P2_LOG" || { /usr/bin/echo "ERROR: pass2 NO stamp"; exit 2; }
-  /usr/bin/grep "\[verify-graph\]" "$P2_LOG" | /usr/bin/grep -qE "FAIL" && { /usr/bin/echo "ERROR: pass2 FAIL"; exit 2; }
+  /usr/bin/grep -qE "\[verify-graph\] (\[PASS\]|✅[[:space:]]*PASS|\[SKIP-NOOP\])" "$P2_LOG" \
+    || { /usr/bin/echo "ERROR: pass2 no explicit verify-graph PASS or SKIP-NOOP stamp"; exit 2; }
   /usr/bin/echo "[pass2] verify-graph: PASS"
 else
   /usr/bin/echo "[pass2] SKIP — adaptive_results.json exists (set FORCE=1 to override)"

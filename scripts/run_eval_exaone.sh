@@ -129,12 +129,8 @@ else
       --max_gen_toks $MG --max_model_len $MML \
       --max_num_seqs 8 --batch_size 8 --tp 2 \
       --log_samples 2>&1 | /usr/bin/tee "$LOG"
-  if ! /usr/bin/grep -q "\[verify-graph\]" "$LOG" 2>/dev/null; then
-    /usr/bin/echo "ERROR: NO verify-graph stamp. Aborting." >&2
-    exit 2
-  fi
-  if /usr/bin/grep "\[verify-graph\]" "$LOG" | /usr/bin/grep -qE "FAIL"; then
-    /usr/bin/echo "ERROR: verify-graph FAILED. Aborting." >&2
+  if ! /usr/bin/grep -qE "\[verify-graph\] (\[PASS\]|✅[[:space:]]*PASS)" "$LOG" 2>/dev/null; then
+    /usr/bin/echo "ERROR: no explicit verify-graph PASS stamp. Aborting." >&2
     exit 2
   fi
   /usr/bin/echo "[run] verify-graph: PASS"

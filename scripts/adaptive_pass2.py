@@ -195,15 +195,19 @@ def main():
     print(f"[pass2] wrote {out_samples}")
     print(f"[pass2] wrote {out_results}")
 
-    # Verify the FX graph that vLLM compiled actually contained our patched kernels.
-    try:
-        from verify_compiled_graph import verify as _verify_graph
-        cache_root = os.environ.get("VLLM_CACHE_ROOT") or f"/tmp/vllm_cache_{os.getpid()}"
-        ok = _verify_graph(args.kv_quant_method, cache_root, verbose=True)
-        if not ok:
-            print("[WARN] GRAPH-VERIFY FAILED -- patches may have been silently bypassed!")
-    except Exception as e:
-        print(f"[verify-graph] could not run post-hoc check: {e}")
+    # Verify the FX graph that vLLM compiled. If pass-2 had no truncated samples,
+    # vLLM was never launched and there's no graph to inspect — pass-1's stamp stands.
+    if not truncated_idx:
+        print("[verify-graph] [SKIP-NOOP] zero truncated samples; pass1 stamp authoritative")
+    else:
+        try:
+            from verify_compiled_graph import verify as _verify_graph
+            cache_root = os.environ.get("VLLM_CACHE_ROOT") or f"/tmp/vllm_cache_{os.getpid()}"
+            ok = _verify_graph(args.kv_quant_method, cache_root, verbose=True)
+            if not ok:
+                print("[verify-graph] [FAIL] post-hoc verification reported FAIL")
+        except Exception as e:
+            print(f"[verify-graph] [FAIL] exception during post-hoc check: {e}")
 
 
 if __name__ == "__main__":

@@ -227,12 +227,8 @@ else
       --log_samples 2>&1 | /usr/bin/tee "$P1_LOG"
   # Verify pass1 stamp (only on a fresh run — SKIP path trusts existing data;
   # use FORCE=1 to redo + re-stamp).
-  if ! /usr/bin/grep -q "\[verify-graph\]" "$P1_LOG" 2>/dev/null; then
-    /usr/bin/echo "ERROR: pass1 has NO verify-graph stamp. Aborting." >&2
-    exit 2
-  fi
-  if /usr/bin/grep "\[verify-graph\]" "$P1_LOG" | /usr/bin/grep -qE "FAIL"; then
-    /usr/bin/echo "ERROR: pass1 verify-graph FAILED. Aborting." >&2
+  if ! /usr/bin/grep -qE "\[verify-graph\] (\[PASS\]|✅[[:space:]]*PASS)" "$P1_LOG" 2>/dev/null; then
+    /usr/bin/echo "ERROR: pass1 has no explicit verify-graph PASS stamp. Aborting." >&2
     exit 2
   fi
   /usr/bin/echo "[pass1] verify-graph: PASS"
@@ -259,12 +255,8 @@ fi
 # Verify pass2 stamp only if pass2 actually ran in this session
 # (SKIP path trusts existing data; use FORCE=1 to redo + re-stamp).
 if [ "$PASS2_RAN" = "1" ]; then
-  if ! /usr/bin/grep -q "\[verify-graph\]" "$P2_LOG" 2>/dev/null; then
-    /usr/bin/echo "ERROR: pass2 has NO verify-graph stamp. Aborting." >&2
-    exit 2
-  fi
-  if /usr/bin/grep "\[verify-graph\]" "$P2_LOG" | /usr/bin/grep -qE "FAIL"; then
-    /usr/bin/echo "ERROR: pass2 verify-graph FAILED. Aborting." >&2
+  if ! /usr/bin/grep -qE "\[verify-graph\] (\[PASS\]|✅[[:space:]]*PASS|\[SKIP-NOOP\])" "$P2_LOG" 2>/dev/null; then
+    /usr/bin/echo "ERROR: pass2 has no explicit verify-graph PASS or SKIP-NOOP stamp. Aborting." >&2
     exit 2
   fi
   /usr/bin/echo "[pass2] verify-graph: PASS"
