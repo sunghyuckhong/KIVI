@@ -173,8 +173,7 @@ P2_LOG=logs/run_out/${MODEL_TAG}_${VARIANT_TAG}_pass2_${TASK}.log
 #      stamps the prior invocation generated. Use FORCE=1 to re-validate.
 #
 # ---- Pass 1 ----
-# Set FORCE=1 to redo a cell whose outputs already exist. Verify-graph
-# stamp is only checked on a fresh run — SKIP path trusts existing data.
+# Set FORCE=1 to redo a cell whose outputs already exist.
 FORCE="${FORCE:-0}"
 if [ "$FORCE" = "1" ] || [ ! -f "$SAMPLES" ] || [ ! -f "$RESULTS" ]; then
   /usr/bin/echo "[pass1] $TASK  on $MODEL_PATH  (TP=$TP, MG=$PASS1_MG)"
@@ -184,17 +183,20 @@ if [ "$FORCE" = "1" ] || [ ! -f "$SAMPLES" ] || [ ! -f "$RESULTS" ]; then
       --max_gen_toks $PASS1_MG --max_model_len $MML4 \
       --max_num_seqs $MNS_P1 --batch_size $MNS_P1 --tp $TP \
       --log_samples 2>&1 | /usr/bin/tee "$P1_LOG"
-  /usr/bin/grep -qE "\[verify-graph\] (\[PASS\]|✅[[:space:]]*PASS)" "$P1_LOG" \
-    || { /usr/bin/echo "ERROR: pass1 no explicit verify-graph PASS stamp"; exit 2; }
-  /usr/bin/echo "[pass1] verify-graph: PASS"
 else
   /usr/bin/echo "[pass1] SKIP — samples + results exist (set FORCE=1 to override)"
 fi
+# Always validate pass-1 stamp — fresh runs OR cached SKIP. Surfaces FAIL on
+# stale cached cells instead of silently inheriting them.
+/usr/bin/grep -qE "\[verify-graph\] (\[PASS\]|✅[[:space:]]*PASS)" "$P1_LOG" 2>/dev/null \
+  || { /usr/bin/echo "ERROR: pass1 has no PASS stamp at $P1_LOG (cached cell? rerun FORCE=1)"; exit 2; }
+/usr/bin/echo "[pass1] verify-graph: PASS"
 
 # ---- Pass 2 (skip if pass1_mg == pass2_mg — pass2 would just re-run identical) ----
 if [ "$PASS1_MG" -eq "$PASS2_MG" ]; then
   /usr/bin/echo "[pass2] skipped (pass1_mg == pass2_mg == $PASS1_MG; model_max_len=$MODEL_MAX_LEN doesn't allow longer retry)"
   /bin/cp "$RESULTS" "$ADAPTIVE"
+  /usr/bin/echo "[pass2] verify-graph: N/A (Scenario A — pass-2 never invoked, mml=$MODEL_MAX_LEN)"
 elif [ "$FORCE" = "1" ] || [ ! -f "$ADAPTIVE" ]; then
   /usr/bin/echo "[pass2] retry truncated subset @ MG=$PASS2_MG"
   CUDA_VISIBLE_DEVICES=$GPUS $PY scripts/adaptive_pass2.py \
@@ -203,11 +205,15 @@ elif [ "$FORCE" = "1" ] || [ ! -f "$ADAPTIVE" ]; then
       --pass1_mg $PASS1_MG --pass2_mg $PASS2_MG \
       --max_model_len $MML32 --max_num_seqs $MNS_P2 --tp $TP \
       2>&1 | /usr/bin/tee "$P2_LOG"
-  /usr/bin/grep -qE "\[verify-graph\] (\[PASS\]|✅[[:space:]]*PASS)" "$P2_LOG" \
-    || { /usr/bin/echo "ERROR: pass2 no explicit verify-graph PASS stamp"; exit 2; }
+  /usr/bin/grep -qE "\[verify-graph\] (\[PASS\]|✅[[:space:]]*PASS)" "$P2_LOG" 2>/dev/null \
+    || { /usr/bin/echo "ERROR: pass2 has no PASS stamp at $P2_LOG"; exit 2; }
   /usr/bin/echo "[pass2] verify-graph: PASS"
 else
   /usr/bin/echo "[pass2] SKIP — adaptive_results.json exists (set FORCE=1 to override)"
+  # Validate cached pass-2 stamp from prior run (Scenario D).
+  /usr/bin/grep -qE "\[verify-graph\] (\[PASS\]|✅[[:space:]]*PASS)" "$P2_LOG" 2>/dev/null \
+    || { /usr/bin/echo "ERROR: pass2 cached but has no PASS stamp at $P2_LOG (rerun FORCE=1)"; exit 2; }
+  /usr/bin/echo "[pass2] verify-graph: PASS (from cached log)"
 fi
 
 /usr/bin/echo ""

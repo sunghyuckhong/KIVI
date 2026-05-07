@@ -241,14 +241,16 @@ else
       --max_gen_toks $PASS1_MG --max_model_len $MML4 \
       --max_num_seqs $MNS_P1 --batch_size $MNS_P1 --tp $TP \
       --log_samples 2>&1 | /usr/bin/tee "$P1_LOG"
-  # Verify pass1 stamp (only on a fresh run — SKIP path trusts existing data;
-  # use FORCE=1 to redo + re-stamp).
-  if ! /usr/bin/grep -qE "\[verify-graph\] (\[PASS\]|✅[[:space:]]*PASS)" "$P1_LOG" 2>/dev/null; then
-    /usr/bin/echo "ERROR: pass1 has no explicit verify-graph PASS stamp. Aborting." >&2
-    exit 2
-  fi
-  /usr/bin/echo "[pass1] verify-graph: PASS"
 fi
+# Always validate pass-1 stamp — fresh runs OR cached SKIP. If the cached log
+# carries a FAIL or no stamp at all, surface it now (don't silently inherit
+# untrustworthy results).
+if ! /usr/bin/grep -qE "\[verify-graph\] (\[PASS\]|✅[[:space:]]*PASS)" "$P1_LOG" 2>/dev/null; then
+  /usr/bin/echo "ERROR: pass1 has no explicit verify-graph PASS stamp at $P1_LOG. Aborting." >&2
+  /usr/bin/echo "       (cached cell? rerun with FORCE=1 to refresh, or investigate the failure.)" >&2
+  exit 2
+fi
+/usr/bin/echo "[pass1] verify-graph: PASS"
 
 # ---- Pass 2 (skip if pass1_mg == pass2_mg — pass2 would be redundant) ----
 PASS2_RAN=0
@@ -268,14 +270,18 @@ else
   PASS2_RAN=1
 fi
 
-# Verify pass2 stamp only if pass2 actually ran in this session
-# (SKIP path trusts existing data; use FORCE=1 to redo + re-stamp).
-if [ "$PASS2_RAN" = "1" ]; then
+# Always validate pass-2 stamp IF pass-2 was supposed to run (i.e. mg != mg).
+# In Scenario A (pass1_mg == pass2_mg) pass-2 was never invoked → no log → skip.
+# In Scenarios B/C/D pass-2 produced a P2_LOG (fresh or cached) → must show PASS.
+if [ "$PASS1_MG" -ne "$PASS2_MG" ]; then
   if ! /usr/bin/grep -qE "\[verify-graph\] (\[PASS\]|✅[[:space:]]*PASS)" "$P2_LOG" 2>/dev/null; then
-    /usr/bin/echo "ERROR: pass2 has no explicit verify-graph PASS stamp. Aborting." >&2
+    /usr/bin/echo "ERROR: pass2 has no explicit verify-graph PASS stamp at $P2_LOG. Aborting." >&2
+    /usr/bin/echo "       (cached cell? rerun with FORCE=1 to refresh, or investigate the failure.)" >&2
     exit 2
   fi
   /usr/bin/echo "[pass2] verify-graph: PASS"
+else
+  /usr/bin/echo "[pass2] verify-graph: N/A (Scenario A — pass-2 never invoked, mml=$MODEL_MAX_LEN)"
 fi
 
 /usr/bin/echo ""
