@@ -8,7 +8,7 @@
 # Usage:
 #   bash scripts/run_eval_mistral.sh \
 #       [--model mistralai/Mistral-7B-Instruct-v0.2] \
-#       --variant bf16|fp8|pertoken|smkv \
+#       --variant bf16|fp8|pertoken|smkv_fused \
 #       --task gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot \
 #       [--ns 512] [--alpha 1.0] [--beta 1.0] \
 #       [--gpus 0]

@@ -7,7 +7,7 @@
 # Usage:
 #   bash scripts/run_eval_llama.sh \
 #       --model meta-llama/Meta-Llama-3-8B-Instruct \
-#       --variant bf16|fp8|pertoken|smkv|smkv_per_channel \
+#       --variant bf16|fp8|pertoken|smkv_fused|smkv_per_channel \
 #       --task gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot \
 #       [--ns 512] [--alpha 1.0] [--beta 1.0] \
 #       [--gpus 0]
@@ -34,7 +34,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -z "$MODEL_PATH" ] || [ -z "$VARIANT" ] || [ -z "$TASK" ] && {
-  /usr/bin/echo "Required: --model HF_PATH --variant {bf16|fp8|pertoken|smkv|smkv_per_channel} --task {gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot}"
+  /usr/bin/echo "Required: --model HF_PATH --variant {bf16|fp8|pertoken|smkv_fused|smkv_per_channel} --task {gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot}"
   exit 1
 }
 
@@ -81,8 +81,8 @@ case "$VARIANT" in
   bf16)     METHOD_ARGS="--kv_quant_method bf16";              VARIANT_TAG="bf16" ;;
   fp8)      METHOD_ARGS="--kv_quant_method fp8 --group_size 128";    VARIANT_TAG="fp8_g128" ;;
   pertoken) METHOD_ARGS="--kv_quant_method pertoken --bits 4 --group_size 128"; VARIANT_TAG="pertoken_int4_g128" ;;
-  smkv)
-    # Match Qwen3 runner's calib structure (run_eval_qwen3.sh smkv branch):
+  smkv_fused)
+    # Match Qwen3 runner's calib structure (run_eval_qwen3.sh smkv_fused branch):
     # BASE is generated with α=1.0 β=1.0 so make_alpha_variants's betas-block
     # writes a file whose name encodes both alpha and beta (`_a${AS}_b${BS}_`),
     # which is what we then pick up as VAR. No q_norm here, so use plain

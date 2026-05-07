@@ -13,14 +13,14 @@
 #
 # Usage:
 #   bash scripts/run_eval_exaone.sh \
-#       --variant bf16|fp8|pertoken|smkv \
+#       --variant bf16|fp8|pertoken|smkv_fused \
 #       --task gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot \
 #       [--ns 512] [--alpha 1.0] [--beta 1.0] \
 #       [--gpus 0,1]                        # TP=2 pair (33B doesn't fit on 80GB single)
 #
 # Examples:
 #   bash scripts/run_eval_exaone.sh --variant bf16 --task gsm8k_cot --gpus 0,1
-#   bash scripts/run_eval_exaone.sh --variant smkv --gpus 6,7 --task minerva_math500
+#   bash scripts/run_eval_exaone.sh --variant smkv_fused --gpus 6,7 --task minerva_math500
 set -euo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export HF_TOKEN="${HF_TOKEN:-$(/bin/cat ~/.cache/huggingface/token 2>/dev/null || /bin/echo '')}"
@@ -40,7 +40,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -z "$VARIANT" ] || [ -z "$TASK" ] && {
-  /usr/bin/echo "Required: --variant {bf16|fp8|pertoken|smkv} --task {gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot}"
+  /usr/bin/echo "Required: --variant {bf16|fp8|pertoken|smkv_fused} --task {gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot}"
   exit 1
 }
 
@@ -84,7 +84,7 @@ case "$VARIANT" in
   bf16)     METHOD_ARGS="--kv_quant_method bf16";              VARIANT_TAG="bf16" ;;
   fp8)      METHOD_ARGS="--kv_quant_method fp8 --group_size 128";    VARIANT_TAG="fp8_g128" ;;
   pertoken) METHOD_ARGS="--kv_quant_method pertoken --bits 4 --group_size 128"; VARIANT_TAG="pertoken_int4_g128" ;;
-  smkv)
+  smkv_fused)
     fmt() { /usr/bin/awk -v v="$1" 'BEGIN{ if(v==int(v)) printf "%d", v; else printf "%g", v; }'; }
     AS=$(fmt $ALPHA); BS=$(fmt $BETA)
     BASE="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}.pt"
@@ -108,7 +108,7 @@ case "$VARIANT" in
     calib_path="$VAR"
     METHOD_ARGS="--kv_quant_method smoothkv_fused --calib_path $calib_path --bits 4 --group_size 128"
     ;;
-  *) /usr/bin/echo "variant must be bf16|fp8|pertoken|smkv"; exit 1 ;;
+  *) /usr/bin/echo "variant must be bf16|fp8|pertoken|smkv_fused"; exit 1 ;;
 esac
 
 LOG=logs/run_out/${MODEL_TAG}_${VARIANT_TAG}_${TASK}.log

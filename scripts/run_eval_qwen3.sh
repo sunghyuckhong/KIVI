@@ -8,7 +8,7 @@
 # Usage:
 #   bash scripts/run_eval_qwen3.sh \
 #       --size 8b|32b \
-#       --variant bf16|fp8|pertoken|smkv|smkv_per_channel \
+#       --variant bf16|fp8|pertoken|smkv_fused|smkv_per_channel \
 #       --task gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot \
 #       [--ns 512]                     # SmoothKV calib sample count
 #       [--alpha 1.0] [--beta 1.0]     # SmoothKV α/β
@@ -20,11 +20,11 @@
 #   bash scripts/run_eval_qwen3.sh --size 8b --variant bf16 --task gsm8k_cot --gpus 0
 #
 #   # Qwen3-32B SmoothKV α=1 chat-calib (default) n_s=512 on minerva (TP=2)
-#   bash scripts/run_eval_qwen3.sh --size 32b --variant smkv --gpus 0,1 \
+#   bash scripts/run_eval_qwen3.sh --size 32b --variant smkv_fused--gpus 0,1 \
 #       --task minerva_math500
 #
 #   # Same but with raw-text calibration instead of chat-template
-#   bash scripts/run_eval_qwen3.sh --size 32b --variant smkv --no_chat_calib --gpus 0,1 \
+#   bash scripts/run_eval_qwen3.sh --size 32b --variant smkv_fused--no_chat_calib --gpus 0,1 \
 #       --task minerva_math500
 #
 # Output:
@@ -60,7 +60,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -z "$SIZE" ] || [ -z "$VARIANT" ] || [ -z "$TASK" ] && {
-  /usr/bin/echo "Required: --size {8b|32b|30b-a3b} --variant {bf16|fp8|pertoken|smkv|smkv_per_channel} --task {gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot}"
+  /usr/bin/echo "Required: --size {8b|32b|30b-a3b} --variant {bf16|fp8|pertoken|smkv_fused|smkv_per_channel} --task {gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot}"
   exit 1
 }
 
@@ -113,7 +113,7 @@ case "$VARIANT" in
   bf16)     METHOD_ARGS="--kv_quant_method bf16";              VARIANT_TAG="bf16" ;;
   fp8)      METHOD_ARGS="--kv_quant_method fp8 --group_size 128";    VARIANT_TAG="fp8_g128" ;;
   pertoken) METHOD_ARGS="--kv_quant_method pertoken --bits 4 --group_size 128"; VARIANT_TAG="pertoken_int4_g128" ;;
-  smkv)
+  smkv_fused)
     # Format alpha/beta into filename (e.g. 1 → "1", 0.75 → "0.75")
     fmt() { /usr/bin/awk -v v="$1" 'BEGIN{ if(v==int(v)) printf "%d", v; else printf "%g", v; }'; }
     AS=$(fmt $ALPHA); BS=$(fmt $BETA)
@@ -150,7 +150,7 @@ case "$VARIANT" in
   smkv_per_channel)
     # Per-(layer, kv_head, head_dim) UNIQUE smoothing factors. For Qwen3-8B
     # that's 36 layers × 8 kv_heads × 128 = 36864 unique s_K values (and
-    # same for s_V) — versus the head-uniform `smkv` variant which shares
+    # same for s_V) — versus the head-uniform `smkv_fused` variant which shares
     # a single (head_dim,) row across all heads in a layer.
     #
     # Why a separate variant: the fused path (smoothkv_fused) folds s_K
@@ -204,7 +204,7 @@ case "$VARIANT" in
     # Use the runtime smoothkv kernel (NOT smoothkv_fused) so per-head s_K applies.
     METHOD_ARGS="--kv_quant_method smoothkv --calib_path $calib_path --bits 4 --group_size 128"
     ;;
-  *) /usr/bin/echo "variant must be bf16|fp8|pertoken|smkv|smkv_per_channel"; exit 1 ;;
+  *) /usr/bin/echo "variant must be bf16|fp8|pertoken|smkv_fused|smkv_per_channel"; exit 1 ;;
 esac
 
 SAMPLES=logs/${TASK}_${MODEL_TAG}_${VARIANT_TAG}_chat_vllm_samples.json

@@ -18,7 +18,7 @@
 #   make run-all                          # qwen3-8b + llama + mistral
 #
 # Common overrides:
-#   make run-qwen3-8b VARIANTS="bf16 smkv"
+#   make run-qwen3-8b VARIANTS="bf16 smkv_fused"
 #   make run-llama TASKS=gsm8k_cot
 #   make run-llama LLAMA_MODEL=meta-llama/Meta-Llama-3-70B-Instruct GPUS="0,1"
 #   make run-qwen3-8b ALPHA=0.5 BETA=0.5  # SmoothKV variant sweep
@@ -55,7 +55,7 @@ PIP        := $(VENV)/bin/pip
 export PY
 
 # --- Defaults (override on command line or via env) --------------------------
-VARIANTS       ?= bf16 fp8 pertoken smkv
+VARIANTS       ?= bf16 fp8 pertoken smkv_fused
 TASKS          ?= gsm8k_cot minerva_math500 gpqa_main_cot_n_shot
 NS             ?= 512
 ALPHA          ?= 1.0
