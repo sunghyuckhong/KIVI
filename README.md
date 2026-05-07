@@ -267,15 +267,18 @@ Example file:
 
 ## Trust gate
 
-A cell's `_adaptive_results.json` is only trusted if both its pass-1 and
-pass-2 logs carry a verify-graph stamp. The stamp says what happened during
-torch.compile:
+A cell is trusted iff:
+
+- **only pass-1 ran** (no truncated samples → pass-2 was a no-op): pass-1's
+  log carries `[verify-graph] [PASS]`, **or**
+- **both passes ran**: each pass's log carries `[verify-graph] [PASS]`.
+
+Anything else is a `[FAIL]` and the cell is not trustworthy.
 
 | Stamp | What it means |
 |---|---|
-| `[PASS]` | The compiled FX graph contains the expected `vllm_kv_quant::*` ops (or, for `bf16`, no forbidden quant ops). Trust the number. |
+| `[PASS]` | The compiled FX graph contains the expected `vllm_kv_quant::*` ops (or, for `bf16`, no forbidden quant ops). Pass-2 also emits `[PASS]` when it had no truncated samples to retry — pass-1's stamp covers the actual eval. |
 | `[FAIL]` | The graph was inspected and was **wrong** — e.g. expected ops missing (silent fallback to bf16 via a stale compile-cache hit), or forbidden quant ops present in a `bf16` baseline. **Don't trust the number; clear the cache and rerun.** |
-| `[SKIP-NOOP]` | Pass-2 only. Pass-1 had zero truncated samples, so pass-2 had nothing to retry, no model was launched, and no graph was produced. Pass-1's stamp stands. |
 
 The gate is enforced at three levels:
 
@@ -286,9 +289,8 @@ The gate is enforced at three levels:
    `run_eval_vllm.py` and `scripts/adaptive_pass2.py`) — greps inductor's
    `computation_graph.py` dump for the kernel names and prints the stamp.
 3. **Pipeline-level** (each shell runner) — greps the log; aborts with
-   `exit 2` unless it sees a `[PASS]` (or `[SKIP-NOOP]` for pass-2). A bare
-   `[verify-graph] ...` line without an explicit verdict does **not** satisfy
-   the gate.
+   `exit 2` unless it sees a `[PASS]`. A bare `[verify-graph] ...` line
+   without an explicit verdict does **not** satisfy the gate.
 
 (Older runs may carry the equivalent `✅ PASS` / `❌ ...` emoji form;
 the gate accepts both.)

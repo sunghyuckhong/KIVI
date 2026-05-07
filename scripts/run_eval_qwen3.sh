@@ -259,8 +259,8 @@ fi
 # Verify pass2 stamp only if pass2 actually ran in this session
 # (SKIP path trusts existing data; use FORCE=1 to redo + re-stamp).
 if [ "$PASS2_RAN" = "1" ]; then
-  if ! /usr/bin/grep -qE "\[verify-graph\] (\[PASS\]|✅[[:space:]]*PASS|\[SKIP-NOOP\])" "$P2_LOG" 2>/dev/null; then
-    /usr/bin/echo "ERROR: pass2 has no explicit verify-graph PASS or SKIP-NOOP stamp. Aborting." >&2
+  if ! /usr/bin/grep -qE "\[verify-graph\] (\[PASS\]|✅[[:space:]]*PASS)" "$P2_LOG" 2>/dev/null; then
+    /usr/bin/echo "ERROR: pass2 has no explicit verify-graph PASS stamp. Aborting." >&2
     exit 2
   fi
   /usr/bin/echo "[pass2] verify-graph: PASS"

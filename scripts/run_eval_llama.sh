@@ -190,8 +190,8 @@ elif [ "$FORCE" = "1" ] || [ ! -f "$ADAPTIVE" ]; then
       --pass1_mg $PASS1_MG --pass2_mg $PASS2_MG \
       --max_model_len $MML32 --max_num_seqs $MNS_P2 --tp $TP \
       2>&1 | /usr/bin/tee "$P2_LOG"
-  /usr/bin/grep -qE "\[verify-graph\] (\[PASS\]|✅[[:space:]]*PASS|\[SKIP-NOOP\])" "$P2_LOG" \
-    || { /usr/bin/echo "ERROR: pass2 no explicit verify-graph PASS or SKIP-NOOP stamp"; exit 2; }
+  /usr/bin/grep -qE "\[verify-graph\] (\[PASS\]|✅[[:space:]]*PASS)" "$P2_LOG" \
+    || { /usr/bin/echo "ERROR: pass2 no explicit verify-graph PASS stamp"; exit 2; }
   /usr/bin/echo "[pass2] verify-graph: PASS"
 else
   /usr/bin/echo "[pass2] SKIP — adaptive_results.json exists (set FORCE=1 to override)"
