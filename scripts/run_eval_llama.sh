@@ -82,22 +82,26 @@ case "$VARIANT" in
   fp8)      METHOD_ARGS="--kv_quant_method fp8 --group_size 128";    VARIANT_TAG="fp8_g128" ;;
   pertoken) METHOD_ARGS="--kv_quant_method pertoken --bits 4 --group_size 128"; VARIANT_TAG="pertoken_int4_g128" ;;
   smkv)
+    # Match Qwen3 runner's calib structure (run_eval_qwen3.sh smkv branch):
+    # BASE is generated with α=1.0 β=1.0 so make_alpha_variants's betas-block
+    # writes a file whose name encodes both alpha and beta (`_a${AS}_b${BS}_`),
+    # which is what we then pick up as VAR. No q_norm here, so use plain
+    # `--pair_max_k --no_head_uniform_k` (vs Qwen3's halfpair+huk).
     fmt() { /usr/bin/awk -v v="$1" 'BEGIN{ if(v==int(v)) printf "%d", v; else printf "%g", v; }'; }
     AS=$(fmt $ALPHA); BS=$(fmt $BETA)
     BASE="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}.pt"
-    VAR="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_a${AS}b${BS}_pair.pt"
-    [ "$AS" = "1" ] && [ "$BS" = "1" ] && VAR="logs/calib/smoothkv_${MODEL_TAG}_ns${NS}_puremax_a1b1_pair.pt"
-    VARIANT_TAG="smoothkv_fused_g128_perc_ns${NS}_puremax_a${AS}b${BS}_pair"
+    VAR="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_a${AS}_b${BS}_pair.pt"
+    VARIANT_TAG="smoothkv_fused_g128_perc_ns${NS}_a${AS}_b${BS}_pair"
     if [ ! -f "$BASE" ]; then
-      /usr/bin/echo "[calib] generating base $BASE  (n_s=$NS)"
+      /usr/bin/echo "[calib] generating base $BASE  (n_s=$NS, alpha=1.0 beta=1.0)"
       CUDA_VISIBLE_DEVICES=$GPUS $PY run_smoothkv_calibrate.py \
         --model "$MODEL_PATH" \
         --num_samples $NS --seq_length 2048 \
-        --alpha 0.5 --beta 0.5 --samples_per_channel 10000 \
+        --alpha 1.0 --beta 1.0 \
         --output "$BASE" $( [ "$TP" -gt 1 ] && /usr/bin/echo "--device auto" )
     fi
     if [ ! -f "$VAR" ]; then
-      /usr/bin/echo "[calib] deriving $VAR  (α=$ALPHA β=$BETA, pair, no HUK — Llama has no q_norm)"
+      /usr/bin/echo "[calib] deriving $VAR  (α=$ALPHA β=$BETA, pair, no HUK — Llama/Mistral have no q_norm)"
       $PY scripts/make_alpha_variants.py \
         --base "$BASE" --alphas $ALPHA --betas $BETA \
         --pair_max_k --no_head_uniform_k
