@@ -212,7 +212,7 @@ Each cell writes three artifacts under `logs/`:
 |------|---------|
 | `<task>_<model>_<variant>_chat_vllm_results.json` | Pass-1 score (preliminary; doesn't account for truncation) |
 | `<task>_<model>_<variant>_chat_vllm_samples.json` | Per-item generations from pass 1 |
-| `<task>_<model>_<variant>_chat_vllm_adaptive_results.json` | **Final headline number** (pass-1 + pass-2 retried truncated items, merged + rescored) |
+| `<task>_<model>_<variant>_chat_vllm_adaptive_results.json` | **Final headline number** (pass-1 + pass-2 retried truncated items, merged + rescored via `scripts/scoring.py`, which delegates to lm-eval's own filter classes — `lm_eval.filters.get_filter` + `lm_eval.api.metrics.exact_match_hf_evaluate` — so the metric is byte-equivalent to what lm-eval would have produced if it had scored the merged set itself) |
 
 Plus per-pass logs in `logs/run_out/*_pass{1,2}_<task>.log`.
 
@@ -267,17 +267,29 @@ Example file:
 
 ## Trust gate
 
-Every `_adaptive_results.json` requires a `[verify-graph] ✅ PASS` stamp on
-**both** pass-1 and pass-2 logs. This is checked at three levels:
+Every `_adaptive_results.json` requires a verify-graph stamp on **both**
+pass-1 and pass-2 logs. The stamp format is one of:
+
+  | Stamp | Meaning |
+  |---|---|
+  | `[verify-graph] [PASS]` (or older `[verify-graph] ✅ PASS`) | FX graph contains the expected `vllm_kv_quant::*` ops |
+  | `[verify-graph] [FAIL]` (or older `[verify-graph] ❌ ...`) | Expected ops missing, forbidden ops present (e.g. quant ops in a `bf16` baseline = silent fallback), or post-hoc verifier raised an exception |
+  | `[verify-graph] [SKIP-NOOP]` | Pass-2 only: zero truncated samples — no LLM was launched, no graph to inspect, pass-1 stamp stands |
+
+Verification is checked at three levels:
 
 1. **Unit-level** (`tests/test_verify_graph.py`, run via `make test`) — runs each
    method through `torch._dynamo.export` and asserts the captured FX graph
    contains the expected `vllm_kv_quant::*` op signatures.
 2. **Eval-level** (`scripts/verify_compiled_graph.py`, called automatically at
    the end of every `run_eval_vllm.py` and `scripts/adaptive_pass2.py`) — greps
-   inductor's `computation_graph.py` dump for kernel names.
-3. **Pipeline-level** (each shell runner) — greps the log for the stamp;
-   aborts with `exit 2` if missing or `FAIL`.
+   inductor's `computation_graph.py` dump for kernel names. Every code path
+   inside the post-hoc check emits an explicit `[PASS]` / `[FAIL]` / `[SKIP-NOOP]`
+   line so the shell gate can tell a real pass from a swallowed exception.
+3. **Pipeline-level** (each shell runner) — requires an explicit `[PASS]` /
+   `✅ PASS` (or `[SKIP-NOOP]` for pass-2) in the log; aborts with `exit 2`
+   otherwise. A bare `[verify-graph] ...` line without an explicit verdict
+   no longer satisfies the gate.
 
 Per-method expected substrings:
 
