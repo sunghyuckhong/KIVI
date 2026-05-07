@@ -66,10 +66,14 @@ done
 
 case "$SIZE" in 8b|32b|30b-a3b) ;; *) /usr/bin/echo "size must be 8b|32b|30b-a3b"; exit 1 ;; esac
 case "$SIZE" in
-  30b-a3b) MODEL_PATH="Qwen/Qwen3-30B-A3B-Instruct-2507" ;;
+  30b-a3b) MODEL_PATH="Qwen/Qwen3-30B-A3B" ;;
   *)       MODEL_PATH="Qwen/Qwen3-${SIZE^^}" ;;
 esac
-MODEL_TAG="qwen3-${SIZE}"
+# Match run_eval_vllm.py's output_name(): basename(model).lower(). For 8b/32b
+# this is unchanged ("qwen3-8b" / "qwen3-32b"); for 30b-a3b it now correctly
+# reflects the full HF id ("qwen3-30b-a3b-instruct-2507"), so pass-2 finds
+# the samples pass-1 wrote.
+MODEL_TAG=$(/usr/bin/basename "$MODEL_PATH" | /usr/bin/tr '[:upper:]' '[:lower:]')
 
 case "$TASK" in
   gsm8k_cot|minerva_math500) PROMPT_BUDGET=1536 ;;
