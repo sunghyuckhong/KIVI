@@ -267,29 +267,31 @@ Example file:
 
 ## Trust gate
 
-Every `_adaptive_results.json` requires a verify-graph stamp on **both**
-pass-1 and pass-2 logs. The stamp format is one of:
+A cell's `_adaptive_results.json` is only trusted if both its pass-1 and
+pass-2 logs carry a verify-graph stamp. The stamp says what happened during
+torch.compile:
 
-  | Stamp | Meaning |
-  |---|---|
-  | `[verify-graph] [PASS]` (or older `[verify-graph] ✅ PASS`) | FX graph contains the expected `vllm_kv_quant::*` ops |
-  | `[verify-graph] [FAIL]` (or older `[verify-graph] ❌ ...`) | Expected ops missing, forbidden ops present (e.g. quant ops in a `bf16` baseline = silent fallback), or post-hoc verifier raised an exception |
-  | `[verify-graph] [SKIP-NOOP]` | Pass-2 only: zero truncated samples — no LLM was launched, no graph to inspect, pass-1 stamp stands |
+| Stamp | What it means |
+|---|---|
+| `[PASS]` | The compiled FX graph contains the expected `vllm_kv_quant::*` ops (or, for `bf16`, no forbidden quant ops). Trust the number. |
+| `[FAIL]` | The graph was inspected and was **wrong** — e.g. expected ops missing (silent fallback to bf16 via a stale compile-cache hit), or forbidden quant ops present in a `bf16` baseline. **Don't trust the number; clear the cache and rerun.** |
+| `[SKIP-NOOP]` | Pass-2 only. Pass-1 had zero truncated samples, so pass-2 had nothing to retry, no model was launched, and no graph was produced. Pass-1's stamp stands. |
 
-Verification is checked at three levels:
+The gate is enforced at three levels:
 
 1. **Unit-level** (`tests/test_verify_graph.py`, run via `make test`) — runs each
    method through `torch._dynamo.export` and asserts the captured FX graph
-   contains the expected `vllm_kv_quant::*` op signatures.
-2. **Eval-level** (`scripts/verify_compiled_graph.py`, called automatically at
-   the end of every `run_eval_vllm.py` and `scripts/adaptive_pass2.py`) — greps
-   inductor's `computation_graph.py` dump for kernel names. Every code path
-   inside the post-hoc check emits an explicit `[PASS]` / `[FAIL]` / `[SKIP-NOOP]`
-   line so the shell gate can tell a real pass from a swallowed exception.
-3. **Pipeline-level** (each shell runner) — requires an explicit `[PASS]` /
-   `✅ PASS` (or `[SKIP-NOOP]` for pass-2) in the log; aborts with `exit 2`
-   otherwise. A bare `[verify-graph] ...` line without an explicit verdict
-   no longer satisfies the gate.
+   contains the expected ops.
+2. **Eval-level** (`scripts/verify_compiled_graph.py`, called at the end of
+   `run_eval_vllm.py` and `scripts/adaptive_pass2.py`) — greps inductor's
+   `computation_graph.py` dump for the kernel names and prints the stamp.
+3. **Pipeline-level** (each shell runner) — greps the log; aborts with
+   `exit 2` unless it sees a `[PASS]` (or `[SKIP-NOOP]` for pass-2). A bare
+   `[verify-graph] ...` line without an explicit verdict does **not** satisfy
+   the gate.
+
+(Older runs may carry the equivalent `✅ PASS` / `❌ ...` emoji form;
+the gate accepts both.)
 
 Per-method expected substrings:
 
