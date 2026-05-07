@@ -269,11 +269,20 @@ Example file:
 
 A cell is trusted iff:
 
-- **only pass-1 ran** (no truncated samples → pass-2 was a no-op): pass-1's
-  log carries `[verify-graph] [PASS]`, **or**
+- **only pass-1 ran** (pass-2 was skipped because `pass1_mg == pass2_mg`,
+  e.g. Llama-3-8B with mml=8192): pass-1's log carries `[verify-graph] [PASS]`, **or**
 - **both passes ran**: each pass's log carries `[verify-graph] [PASS]`.
 
 Anything else is a `[FAIL]` and the cell is not trustworthy.
+
+How "what ran" is decided per cell:
+
+| Scenario | When | What's enforced |
+|---|---|---|
+| **A** — pass-1 only | `pass1_mg == pass2_mg` (e.g. Llama mml=8192). Runner copies `_results.json` → `_adaptive_results.json` and never invokes pass-2. | Pass-1 must emit `[PASS]`. |
+| **B** — both passes | `pass1_mg < pass2_mg` and pass-1 had ≥1 truncated sample. Pass-2 launches vLLM, retries the truncated subset at MG=32k, merges + rescores. | Pass-1 AND pass-2 must each emit `[PASS]`. |
+| **C** — both passes, pass-2 noop | `pass1_mg < pass2_mg` but every pass-1 response fit under MG=4k. Pass-2 process runs but doesn't launch vLLM (nothing to retry). | Pass-1 AND pass-2 must each emit `[PASS]`. Pass-2's stamp is the noop variant emitted by `adaptive_pass2.py` directly. |
+| **D** — cached skip | `FORCE=0` and outputs already exist on disk. The runner skips both passes for this invocation. | Nothing — the cell's existing stamps from a prior invocation are trusted. To re-validate, set `FORCE=1`. |
 
 | Stamp | What it means |
 |---|---|

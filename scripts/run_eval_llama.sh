@@ -159,6 +159,19 @@ P1_LOG=logs/run_out/${MODEL_TAG}_${VARIANT_TAG}_pass1_${TASK}.log
 P2_LOG=logs/run_out/${MODEL_TAG}_${VARIANT_TAG}_pass2_${TASK}.log
 /bin/mkdir -p logs/run_out logs/calib
 
+# ---- Trust gate scenarios (see README.md "Trust gate" table) ----
+#   A  pass-1 only: pass1_mg == pass2_mg → pass-2 entirely skipped (cp _results
+#      → _adaptive_results). Pass-1 must emit [PASS]. Common for Llama-3-8B
+#      (mml=8192).
+#   B  both passes ran: pass-1 had ≥1 truncated sample → pass-2 retries.
+#      Both passes must emit [PASS].
+#   C  both passes ran, pass-2 noop: pass-1 had 0 truncated samples →
+#      adaptive_pass2.py emits [PASS] directly without launching vLLM. Common
+#      for Mistral on short-output tasks (gsm8k_cot).
+#   D  cached skip: FORCE=0 + outputs exist → runner skips both passes,
+#      no fresh stamps. Existing _adaptive_results.json carries whatever
+#      stamps the prior invocation generated. Use FORCE=1 to re-validate.
+#
 # ---- Pass 1 ----
 # Set FORCE=1 to redo a cell whose outputs already exist. Verify-graph
 # stamp is only checked on a fresh run — SKIP path trusts existing data.

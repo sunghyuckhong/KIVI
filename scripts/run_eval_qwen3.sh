@@ -215,6 +215,18 @@ P2_LOG=logs/run_out/${MODEL_TAG}_${VARIANT_TAG}_pass2_${TASK}.log
 /bin/mkdir -p logs/run_out logs/calib
 
 # ---- Pass 1 ----
+# ---- Trust gate scenarios (see README.md "Trust gate" table) ----
+#   A  pass-1 only: pass1_mg == pass2_mg → pass-2 entirely skipped (cp _results
+#      → _adaptive_results). Pass-1 must emit [PASS].
+#   B  both passes ran: pass-1 had ≥1 truncated sample → pass-2 retries.
+#      Both passes must emit [PASS].
+#   C  both passes ran, pass-2 noop: pass-1 had 0 truncated samples →
+#      adaptive_pass2.py emits [PASS] directly without launching vLLM.
+#      Both stamps required, gate satisfied.
+#   D  cached skip: FORCE=0 + outputs exist → runner skips both passes,
+#      no fresh stamps. Existing _adaptive_results.json carries whatever
+#      stamps the prior invocation generated. Use FORCE=1 to re-validate.
+#
 # Skip if outputs exist AND FORCE != 1. Set FORCE=1 to redo a cell (e.g. to
 # pick up a new verify-graph stamp after upgrading the fork).
 FORCE="${FORCE:-0}"
