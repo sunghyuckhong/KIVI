@@ -282,7 +282,7 @@ How "what ran" is decided per cell:
 | **A** — pass-1 only | `pass1_mg == pass2_mg` (e.g. Llama mml=8192). Runner copies `_results.json` → `_adaptive_results.json` and never invokes pass-2. | Pass-1 must emit `[PASS]`. |
 | **B** — both passes | `pass1_mg < pass2_mg` and pass-1 had ≥1 truncated sample. Pass-2 launches vLLM, retries the truncated subset at MG=32k, merges + rescores. | Pass-1 AND pass-2 must each emit `[PASS]`. |
 | **C** — both passes, pass-2 noop | `pass1_mg < pass2_mg` but every pass-1 response fit under MG=4k. Pass-2 process runs but doesn't launch vLLM (nothing to retry). | Pass-1 AND pass-2 must each emit `[PASS]`. Pass-2's stamp is the noop variant emitted by `adaptive_pass2.py` directly. |
-| **D** — cached skip | `FORCE=0` and outputs already exist on disk. The runner skips both passes for this invocation. | Nothing — the cell's existing stamps from a prior invocation are trusted. To re-validate, set `FORCE=1`. |
+| **D** — cached skip | `FORCE=0` and outputs already exist on disk. The runner skips re-running both passes. | The runner still greps the existing `P1_LOG` (and `P2_LOG` if pass-2 was supposed to run) for a `[PASS]` stamp and exits `2` if either cached log carries no `[PASS]` (e.g. a stale `[FAIL]` or pre-stamping run). Set `FORCE=1` to refresh. |
 
 | Stamp | What it means |
 |---|---|
