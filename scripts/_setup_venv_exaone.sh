@@ -2,18 +2,23 @@
 # One-time setup of /workspace/KIVI/.venv-exaone with:
 #   - PyTorch (driver-detected cu128/cu130 wheels)
 #   - nuxlear/transformers @ add-exaone4_5-v5.3.0.dev0 (recognizes exaone4_5)
-#   - lkm2835/vllm @ add-exaone4_5 + KV-cache fake-quant code (built from source)
+#   - sunghyuckhong/vllm-compression-part @ kv_cache_quant_exaone4_5
+#     (KV-cache fake-quant code rebased onto lkm2835/vllm@add-exaone4_5)
 #   - KIVI eval-harness deps (lm-eval etc.)
 #
-# Note: this script INSTALLS the vllm fork at /workspace/sunghyuck/vllm-exaone-fork.
-# The KV-cache fake-quant code must already be rebased onto that path before
-# vllm pip install. The Makefile target `make setup-exaone-4.5` calls this script.
+# Clones the fork from VLLM_EXAONE_FORK_URL into VLLM_EXAONE_FORK_PATH if
+# missing, then checks out VLLM_EXAONE_FORK_COMMIT. Variables are exported by
+# the Makefile (target `make setup-exaone-4.5`); override on the command line
+# if running this script directly.
 
 set -euo pipefail
 cd /workspace/KIVI
 
 VENV=.venv-exaone
-VLLM_PATH=/workspace/sunghyuck/vllm-exaone-fork
+VLLM_URL="${VLLM_EXAONE_FORK_URL:-https://github.com/sunghyuckhong/vllm-compression-part.git}"
+VLLM_PATH="${VLLM_EXAONE_FORK_PATH:-/workspace/sunghyuck/vllm-exaone-fork}"
+VLLM_BRANCH="${VLLM_EXAONE_FORK_BRANCH:-kv_cache_quant_exaone4_5}"
+VLLM_COMMIT="${VLLM_EXAONE_FORK_COMMIT:-545dcdf69}"
 
 LOG=logs/run_out/setup_venv_exaone.log
 exec >>"$LOG" 2>&1
@@ -47,6 +52,17 @@ echo "[$(ts)] driver=$DRIVER  →  $PT_LABEL wheels"
 
 $PIP install -U pip wheel
 $PIP install torch==2.11.0 torchvision==0.26.0 --index-url "$PT_INDEX"
+
+# Step: clone (or reuse) the vllm fork, then checkout the pinned commit.
+# Mirrors the regular `make setup` flow for the .venv vllm-compression-part fork.
+if [ ! -d "$VLLM_PATH" ]; then
+  echo "[$(ts)] cloning $VLLM_URL @ $VLLM_BRANCH → $VLLM_PATH"
+  git clone --branch "$VLLM_BRANCH" "$VLLM_URL" "$VLLM_PATH"
+else
+  echo "[$(ts)] $VLLM_PATH already exists; reusing"
+fi
+echo "[$(ts)] checkout pinned commit $VLLM_COMMIT"
+(cd "$VLLM_PATH" && git fetch --all && git checkout "$VLLM_COMMIT")
 
 # Step: install the vllm fork from local path.
 # Our KV-cache fake-quant code is pure-Python (kv_fake_quant package +

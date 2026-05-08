@@ -34,6 +34,17 @@ VLLM_FORK_PATH    ?= /workspace/sunghyuck/vllm-compression-part
 VLLM_FORK_BRANCH  ?= kv_cache_quant
 VLLM_FORK_COMMIT  ?= d4f2eeb3b
 
+# --- vllm-compression-part fork: EXAONE-4.5 branch ---------------------------
+# Same fork repo, different branch — kv_cache_quant_exaone4_5 rebases the
+# KV-cache fake-quant code onto lkm2835/vllm@add-exaone4_5 (which adds the
+# EXAONE-4.5 model class). `make setup-exaone-4.5` clones it into
+# VLLM_EXAONE_FORK_PATH if missing, then checks out the pinned commit.
+VLLM_EXAONE_FORK_URL    ?= https://github.com/sunghyuckhong/vllm-compression-part.git
+VLLM_EXAONE_FORK_PATH   ?= /workspace/sunghyuck/vllm-exaone-fork
+VLLM_EXAONE_FORK_BRANCH ?= kv_cache_quant_exaone4_5
+VLLM_EXAONE_FORK_COMMIT ?= 545dcdf69
+export VLLM_EXAONE_FORK_URL VLLM_EXAONE_FORK_PATH VLLM_EXAONE_FORK_BRANCH VLLM_EXAONE_FORK_COMMIT
+
 # Torch version pinned by the vllm fork's pyproject.toml. We install torch
 # from the PyTorch CUDA-12.8 / CUDA-13.0 wheel index *before* the vllm fork
 # install so pip doesn't fall back to whatever PyPI ships by default

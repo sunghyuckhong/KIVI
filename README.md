@@ -116,20 +116,22 @@ EXAONE-4.5-33B can't share `.venv` with the other model families because:
   versions vllm pins (4.x and 5.7.0) don't recognize. We use the
   [`nuxlear/transformers @ add-exaone4_5-v5.3.0.dev0`](https://github.com/nuxlear/transformers/tree/add-exaone4_5-v5.3.0.dev0)
   fork instead.
-- vLLM upstream doesn't have the EXAONE-4.5 model class yet. We use the
+- vLLM upstream doesn't have the EXAONE-4.5 model class yet. We use a sibling
+  branch in the same fork repo:
+  [`sunghyuckhong/vllm-compression-part @ kv_cache_quant_exaone4_5`](https://github.com/sunghyuckhong/vllm-compression-part/tree/kv_cache_quant_exaone4_5),
+  which rebases the KV-cache fake-quant code (kv_fake_quant subpackage +
+  `KVCacheQuantConfig` + Attention/Worker hooks) onto
   [`lkm2835/vllm @ add-exaone4_5`](https://github.com/lkm2835/vllm/tree/add-exaone4_5)
-  fork, with the KV-cache fake-quant code (kv_fake_quant subpackage +
-  `KVCacheQuantConfig` + Attention/Worker hooks) rebased on top.
+  (the upstream that adds the EXAONE-4.5 model class).
 
-Build the EXAONE venv (one-time, ~5–10 min — uses `VLLM_USE_PRECOMPILED=1`
-to skip the cmake build, then reinstalls transformers + huggingface_hub
-post-vllm-install with `--no-deps` so vllm's transformers pin doesn't
-clobber the nuxlear fork):
+Build the EXAONE venv (one-time, ~5–10 min — clones the EXAONE branch into
+`VLLM_EXAONE_FORK_PATH`, uses `VLLM_USE_PRECOMPILED=1` to skip the cmake
+build, then reinstalls transformers + huggingface_hub post-vllm-install
+with `--no-deps` so vllm's transformers pin doesn't clobber the nuxlear
+fork):
 
 ```bash
-# Clone the EXAONE-branch fork and rebase our KV-cache fake-quant code on top
-# (already done if /workspace/sunghyuck/vllm-exaone-fork exists).
-make setup-exaone-4.5   # builds .venv-exaone via scripts/_setup_venv_exaone.sh
+make setup-exaone-4.5   # clone + build .venv-exaone via scripts/_setup_venv_exaone.sh
 ```
 
 Verify:
@@ -144,10 +146,9 @@ print('OK; model_type=', c.model_type, ' max_pos=', c.max_position_embeddings)
 "
 ```
 
-The KV-cache fake-quant code rebase lives on the
-`add-exaone4_5-with-compression` branch of `vllm-exaone-fork` (single
-squashed commit on top of the fork's `add-exaone4_5` HEAD). To bump it:
-edit + recommit on that branch, then `make setup-exaone-4.5` reinstalls.
+To bump the EXAONE-branch fork: edit + commit on `kv_cache_quant_exaone4_5`,
+push, then update `VLLM_EXAONE_FORK_COMMIT` in the `Makefile` and rerun
+`make setup-exaone-4.5`.
 
 ### 2. Generate calibration (SmoothKV variants only)
 
@@ -215,6 +216,10 @@ All `make run-*` targets read these variables. Override on the command line.
 | `VLLM_FORK_URL` | `https://github.com/sunghyuckhong/vllm-compression-part.git` | Fork remote — `make setup` clones from here if `VLLM_FORK_PATH` is missing. |
 | `VLLM_FORK_PATH` | `/workspace/sunghyuck/vllm-compression-part` | Where the fork lives on disk. |
 | `VLLM_FORK_COMMIT` | (pinned in Makefile) | vllm-compression-part `kv_cache_quant` commit to install. |
+| `VLLM_EXAONE_FORK_URL` | `https://github.com/sunghyuckhong/vllm-compression-part.git` | EXAONE-branch remote — `make setup-exaone-4.5` clones from here if `VLLM_EXAONE_FORK_PATH` is missing. Same fork repo as `VLLM_FORK_URL`, branch `kv_cache_quant_exaone4_5`. |
+| `VLLM_EXAONE_FORK_PATH` | `/workspace/sunghyuck/vllm-exaone-fork` | Where the EXAONE-branch checkout lives on disk. |
+| `VLLM_EXAONE_FORK_BRANCH` | `kv_cache_quant_exaone4_5` | Branch on `VLLM_EXAONE_FORK_URL` to clone (KV-cache fake-quant code rebased onto `lkm2835/vllm@add-exaone4_5`). |
+| `VLLM_EXAONE_FORK_COMMIT` | (pinned in Makefile) | EXAONE-branch commit to install. |
 | `TORCH_VERSION` | `2.11.0` | torch version pinned by the vllm fork's `pyproject.toml`. `make setup` detects driver major version and installs the matching cu128 / cu130 wheel (cu128 for driver major ≥ 555, cu130 for ≥ 575). Aborts with a clear error if driver is older. |
 | `MIN_DRIVER_MAJOR` | `555` | Minimum NVIDIA driver major version compatible with the vllm fork (CUDA 12.8 → driver 555+). Setup errors out below this. |
 | `PY` | `.venv/bin/python` (set by Makefile) | Python interpreter used by the runners. The runners default to `./.venv/bin/python` if `PY` is unset; the Makefile exports `PY` so subprocesses inherit it. Override with `PY=/path/to/python make run-qwen3-8b ...` if you need a different env. |
