@@ -75,8 +75,9 @@ RESET  := $(shell printf '\033[0m')
 
 # =============================================================================
 
-.PHONY: help status setup setup-fork test print-pin \
-        run-qwen3-8b run-qwen3-32b run-llama run-mistral run-exaone run-all
+.PHONY: help status setup setup-fork setup-exaone-4.5 test print-pin \
+        run-qwen3-8b run-qwen3-32b run-qwen3-30b-a3b run-llama run-mistral \
+        run-exaone run-all
 
 # --- Environment setup -------------------------------------------------------
 setup: $(VENV)/bin/activate ## One-time: build vllm fork + venv + install KIVI deps
@@ -141,7 +142,7 @@ help: ## Show available targets
 	@echo "  KIVI evaluation sweeps"
 	@echo "  ======================"
 	@echo ""
-	@grep -E '^[a-zA-Z0-9_-]+:.*## .*$$' $(MAKEFILE_LIST) | sed 's/:.*## /:## /' | \
+	@grep -E '^[a-zA-Z0-9_.-]+:.*## .*$$' $(MAKEFILE_LIST) | sed 's/:.*## /:## /' | \
 		awk 'BEGIN {FS = ":## "}; {printf "  $(CYAN)%-16s$(RESET) %s\n", $$1, $$2}'
 	@echo ""
 	@echo "  Common overrides: VARIANTS, TASKS, GPUS, NS, ALPHA, BETA,"
@@ -194,7 +195,17 @@ run-llama: ## Sweep $(LLAMA_MODEL) (TP=1, auto-parallel)
 run-mistral: ## Sweep $(MISTRAL_MODEL) (TP=1, auto-parallel)
 	@$(SWEEP) --tp 1 --runner scripts/run_eval_mistral.sh --runner_args="--model $(MISTRAL_MODEL)"
 
-run-exaone: ## Sweep EXAONE-4.5-33B (TP=2, auto-parallel)
-	@$(SWEEP) --tp 2 --runner scripts/run_eval_exaone.sh --runner_args=""
+# --- EXAONE-4.5-33B with isolated .venv-exaone -------------------------------
+# Uses lkm2835/vllm@add-exaone4_5 + nuxlear/transformers@add-exaone4_5-v5.3.0.dev0
+# with the KV-cache fake-quant code rebased on top. Built once via
+# `make setup-exaone-4.5`; the runner defaults PY=./.venv-exaone/bin/python
+# but we export it here so subprocesses (parallel_sweep.py) inherit it.
+VENV_EXAONE ?= .venv-exaone
+
+setup-exaone-4.5: ## One-time: build .venv-exaone with the EXAONE forks + KV-cache fake-quant code
+	bash scripts/_setup_venv_exaone.sh
+
+run-exaone: ## Sweep EXAONE-4.5-33B via .venv-exaone (TP=2, auto-parallel)
+	@PY=./$(VENV_EXAONE)/bin/python $(SWEEP) --tp 2 --runner scripts/run_eval_exaone.sh --runner_args=""
 
 run-all: run-qwen3-8b run-llama run-mistral ## Run qwen3-8b + llama + mistral (skips 32b/exaone)

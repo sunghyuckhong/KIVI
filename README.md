@@ -45,12 +45,12 @@ via the shim `run_eval_mistral.sh`) forces `_pair`.
 
 ## Models
 
-| Family | Sizes tested | Tensor parallel |
-|--------|--------------|:---------------:|
-| Qwen3 | 8B, 32B, 30B-A3B (MoE) | 1 / 2 / 2 |
-| Llama-3 | 8B-Instruct (default), any HF id | 1 (8B) / 2-4 (70B) |
-| Mistral | 7B-Instruct-v0.2 | 1 |
-| EXAONE-4.5 | 33B | 2 |
+| Family | Sizes tested | Tensor parallel | venv |
+|--------|--------------|:---------------:|------|
+| Qwen3 | 8B, 32B, 30B-A3B (MoE) | 1 / 2 / 2 | `.venv` |
+| Llama-3 | 8B-Instruct (default), any HF id | 1 (8B) / 2-4 (70B) | `.venv` |
+| Mistral | 7B-Instruct-v0.2 | 1 | `.venv` |
+| EXAONE-4.5 | 33B | 2 | `.venv-exaone` (separate — see [EXAONE-4.5 setup](#exaone-45-setup-isolated-venv)) |
 
 ## Structure
 
@@ -109,6 +109,46 @@ To bump the vllm fork later, edit `VLLM_FORK_COMMIT` in the `Makefile` and run:
 make setup-fork   # re-checkout fork at pinned commit + reinstall (skips venv/deps)
 ```
 
+#### EXAONE-4.5 setup (isolated venv)
+
+EXAONE-4.5-33B can't share `.venv` with the other model families because:
+- The model registers `model_type=exaone4_5` which the upstream `transformers`
+  versions vllm pins (4.x and 5.7.0) don't recognize. We use the
+  [`nuxlear/transformers @ add-exaone4_5-v5.3.0.dev0`](https://github.com/nuxlear/transformers/tree/add-exaone4_5-v5.3.0.dev0)
+  fork instead.
+- vLLM upstream doesn't have the EXAONE-4.5 model class yet. We use the
+  [`lkm2835/vllm @ add-exaone4_5`](https://github.com/lkm2835/vllm/tree/add-exaone4_5)
+  fork, with the KV-cache fake-quant code (kv_fake_quant subpackage +
+  `KVCacheQuantConfig` + Attention/Worker hooks) rebased on top.
+
+Build the EXAONE venv (one-time, ~5–10 min — uses `VLLM_USE_PRECOMPILED=1`
+to skip the cmake build, then reinstalls transformers + huggingface_hub
+post-vllm-install with `--no-deps` so vllm's transformers pin doesn't
+clobber the nuxlear fork):
+
+```bash
+# Clone the EXAONE-branch fork and rebase our KV-cache fake-quant code on top
+# (already done if /workspace/sunghyuck/vllm-exaone-fork exists).
+make setup-exaone-4.5   # builds .venv-exaone via scripts/_setup_venv_exaone.sh
+```
+
+Verify:
+
+```bash
+.venv-exaone/bin/python -c "
+from vllm.config import KVCacheQuantConfig
+from vllm.model_executor.layers.quantization.kv_fake_quant import attach_kv_quant_to_layer
+from transformers import AutoConfig
+c = AutoConfig.from_pretrained('LGAI-EXAONE/EXAONE-4.5-33B', trust_remote_code=True)
+print('OK; model_type=', c.model_type, ' max_pos=', c.max_position_embeddings)
+"
+```
+
+The KV-cache fake-quant code rebase lives on the
+`add-exaone4_5-with-compression` branch of `vllm-exaone-fork` (single
+squashed commit on top of the fork's `add-exaone4_5` HEAD). To bump it:
+edit + recommit on that branch, then `make setup-exaone-4.5` reinstalls.
+
 ### 2. Generate calibration (SmoothKV variants only)
 
 `bf16`, `fp16`, `fp8`, `pertoken` need no calibration. For `smoothkv` and
@@ -139,7 +179,7 @@ make run-qwen3-32b              # 2 GPUs per cell (TP=2)
 make run-qwen3-30b-a3b          # 2 GPUs per cell (TP=2; MoE, ~3B active)
 make run-llama                  # default LLAMA_MODEL=Meta-Llama-3-8B-Instruct
 make run-mistral                # default Mistral-7B-Instruct-v0.2
-make run-exaone                 # TP=2
+make run-exaone                 # TP=2 via .venv-exaone (lkm2835/vllm + nuxlear/transformers + KV-cache fake-quant code)
 
 make run-all                    # qwen3-8b + llama + mistral
 ```
