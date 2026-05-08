@@ -44,7 +44,7 @@ export NO_ENFORCE_EAGER=1
 # the eval-time prompt distribution (we always run with --apply_chat_template
 # at eval), which is the SmoothKV setting we ship in headline numbers. Use
 # --no_chat_calib to opt into raw-text calibration for ablation.
-SIZE=""; VARIANT=""; TASK=""; GPUS="0"; NS=512; ALPHA=1.0; BETA=1.0; CHAT_CALIB=1
+SIZE=""; VARIANT=""; TASK=""; GPUS="0"; NS=512; ALPHA=1.0; BETA=1.0; CHAT_CALIB=1; GROUP_SIZE=128
 while [ $# -gt 0 ]; do
   case "$1" in
     --size) SIZE="$2"; shift 2 ;;
@@ -54,6 +54,7 @@ while [ $# -gt 0 ]; do
     --ns) NS="$2"; shift 2 ;;
     --alpha) ALPHA="$2"; shift 2 ;;
     --beta) BETA="$2"; shift 2 ;;
+    --group_size) GROUP_SIZE="$2"; shift 2 ;;
     --chat_calib) CHAT_CALIB=1; shift ;;
     --no_chat_calib) CHAT_CALIB=0; shift ;;
     *) /usr/bin/echo "Unknown arg: $1"; exit 1 ;;
@@ -111,8 +112,8 @@ MML32=$((PASS2_MG + PROMPT_BUDGET))
 calib_path=""
 case "$VARIANT" in
   bf16)     METHOD_ARGS="--kv_quant_method bf16";              VARIANT_TAG="bf16" ;;
-  fp8)      METHOD_ARGS="--kv_quant_method fp8 --group_size 128";    VARIANT_TAG="fp8_g128" ;;
-  pertoken) METHOD_ARGS="--kv_quant_method pertoken --bits 4 --group_size 128"; VARIANT_TAG="pertoken_int4_g128" ;;
+  fp8)      METHOD_ARGS="--kv_quant_method fp8 --group_size $GROUP_SIZE";    VARIANT_TAG="fp8_g${GROUP_SIZE}" ;;
+  pertoken) METHOD_ARGS="--kv_quant_method pertoken --bits 4 --group_size $GROUP_SIZE"; VARIANT_TAG="pertoken_int4_g${GROUP_SIZE}" ;;
   smkv_fused)
     # Format alpha/beta into filename (e.g. 1 → "1", 0.75 → "0.75")
     fmt() { /usr/bin/awk -v v="$1" 'BEGIN{ if(v==int(v)) printf "%d", v; else printf "%g", v; }'; }
@@ -120,13 +121,13 @@ case "$VARIANT" in
     if [ "$CHAT_CALIB" -eq 1 ]; then
       BASE="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_chat.pt"
       VAR="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_chat_a${AS}_b${BS}_huk_halfpair.pt"
-      VARIANT_TAG="smoothkv_fused_g128_perc_ns${NS}_chat_a${AS}_b${BS}_huk_halfpair"
+      VARIANT_TAG="smoothkv_fused_g${GROUP_SIZE}_perc_ns${NS}_chat_a${AS}_b${BS}_huk_halfpair"
       calib_chat_flag="--apply_chat_template"
     else
       BASE="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}.pt"
       VAR="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_a${AS}_b${BS}_halfpair.pt"
       [ "$AS" = "1" ] && [ "$BS" = "1" ] && VAR="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_puremax_a1b1_halfpair.pt"
-      VARIANT_TAG=$(/usr/bin/basename "$VAR" .pt | /usr/bin/sed "s/smoothkv_${MODEL_TAG}_perc/smoothkv_fused_g128_perc/")
+      VARIANT_TAG=$(/usr/bin/basename "$VAR" .pt | /usr/bin/sed "s/smoothkv_${MODEL_TAG}_perc/smoothkv_fused_g${GROUP_SIZE}_perc/")
       calib_chat_flag=""
     fi
     if [ ! -f "$BASE" ]; then
@@ -145,7 +146,7 @@ case "$VARIANT" in
         --base "$BASE" --alphas $ALPHA --betas $BETA --half_pair_max_k
     fi
     calib_path="$VAR"
-    METHOD_ARGS="--kv_quant_method smoothkv_fused --calib_path $calib_path --bits 4 --group_size 128"
+    METHOD_ARGS="--kv_quant_method smoothkv_fused --calib_path $calib_path --bits 4 --group_size $GROUP_SIZE"
     ;;
   smkv_per_channel)
     # Per-(layer, kv_head, head_dim) UNIQUE smoothing factors. For Qwen3-8B
@@ -169,12 +170,12 @@ case "$VARIANT" in
     if [ "$CHAT_CALIB" -eq 1 ]; then
       BASE="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_chat.pt"
       VAR="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_chat_a${AS}_b${BS}_per_channel.pt"
-      VARIANT_TAG="smoothkv_g128_perc_ns${NS}_chat_a${AS}_b${BS}_per_channel"
+      VARIANT_TAG="smoothkv_g${GROUP_SIZE}_perc_ns${NS}_chat_a${AS}_b${BS}_per_channel"
       calib_chat_flag="--apply_chat_template"
     else
       BASE="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}.pt"
       VAR="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_a${AS}_b${BS}_per_channel.pt"
-      VARIANT_TAG="smoothkv_g128_perc_ns${NS}_a${AS}_b${BS}_per_channel"
+      VARIANT_TAG="smoothkv_g${GROUP_SIZE}_perc_ns${NS}_a${AS}_b${BS}_per_channel"
       calib_chat_flag=""
     fi
     if [ ! -f "$BASE" ]; then
@@ -202,7 +203,7 @@ case "$VARIANT" in
     fi
     calib_path="$VAR"
     # Use the runtime smoothkv kernel (NOT smoothkv_fused) so per-head s_K applies.
-    METHOD_ARGS="--kv_quant_method smoothkv --calib_path $calib_path --bits 4 --group_size 128"
+    METHOD_ARGS="--kv_quant_method smoothkv --calib_path $calib_path --bits 4 --group_size $GROUP_SIZE"
     ;;
   *) /usr/bin/echo "variant must be bf16|fp8|pertoken|smkv_fused|smkv_per_channel"; exit 1 ;;
 esac

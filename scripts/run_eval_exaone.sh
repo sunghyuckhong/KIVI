@@ -26,7 +26,7 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export HF_TOKEN="${HF_TOKEN:-$(/bin/cat ~/.cache/huggingface/token 2>/dev/null || /bin/echo '')}"
 export NO_ENFORCE_EAGER=1
 
-VARIANT=""; TASK=""; GPUS="0,1"; NS=512; ALPHA=1.0; BETA=1.0
+VARIANT=""; TASK=""; GPUS="0,1"; NS=512; ALPHA=1.0; BETA=1.0; GROUP_SIZE=128
 while [ $# -gt 0 ]; do
   case "$1" in
     --variant) VARIANT="$2"; shift 2 ;;
@@ -35,6 +35,7 @@ while [ $# -gt 0 ]; do
     --ns) NS="$2"; shift 2 ;;
     --alpha) ALPHA="$2"; shift 2 ;;
     --beta) BETA="$2"; shift 2 ;;
+    --group_size) GROUP_SIZE="$2"; shift 2 ;;
     *) /usr/bin/echo "Unknown arg: $1"; exit 1 ;;
   esac
 done
@@ -72,15 +73,15 @@ MML=$((MG + PROMPT_BUDGET))
 calib_path=""
 case "$VARIANT" in
   bf16)     METHOD_ARGS="--kv_quant_method bf16";              VARIANT_TAG="bf16" ;;
-  fp8)      METHOD_ARGS="--kv_quant_method fp8 --group_size 128";    VARIANT_TAG="fp8_g128" ;;
-  pertoken) METHOD_ARGS="--kv_quant_method pertoken --bits 4 --group_size 128"; VARIANT_TAG="pertoken_int4_g128" ;;
+  fp8)      METHOD_ARGS="--kv_quant_method fp8 --group_size $GROUP_SIZE";    VARIANT_TAG="fp8_g${GROUP_SIZE}" ;;
+  pertoken) METHOD_ARGS="--kv_quant_method pertoken --bits 4 --group_size $GROUP_SIZE"; VARIANT_TAG="pertoken_int4_g${GROUP_SIZE}" ;;
   smkv_fused)
     # EXAONE-4.5 has q_norm/k_norm → use _huk_halfpair (head-uniform + half-pair) like Qwen3
     fmt() { /usr/bin/awk -v v="$1" 'BEGIN{ if(v==int(v)) printf "%d", v; else printf "%g", v; }'; }
     AS=$(fmt $ALPHA); BS=$(fmt $BETA)
     BASE="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_chat.pt"
     VAR="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_chat_a${AS}_b${BS}_huk_halfpair.pt"
-    VARIANT_TAG="smoothkv_fused_g128_perc_ns${NS}_chat_a${AS}_b${BS}_huk_halfpair"
+    VARIANT_TAG="smoothkv_fused_g${GROUP_SIZE}_perc_ns${NS}_chat_a${AS}_b${BS}_huk_halfpair"
     if [ ! -f "$BASE" ]; then
       /usr/bin/echo "[calib] generating base $BASE  (n_s=$NS, chat-calib)"
       CUDA_VISIBLE_DEVICES=$GPUS $PY run_smoothkv_calibrate.py \
@@ -96,14 +97,14 @@ case "$VARIANT" in
         --head_uniform_k --half_pair_max_k
     fi
     calib_path="$VAR"
-    METHOD_ARGS="--kv_quant_method smoothkv_fused --calib_path $calib_path --bits 4 --group_size 128"
+    METHOD_ARGS="--kv_quant_method smoothkv_fused --calib_path $calib_path --bits 4 --group_size $GROUP_SIZE"
     ;;
   smkv_per_channel)
     fmt() { /usr/bin/awk -v v="$1" 'BEGIN{ if(v==int(v)) printf "%d", v; else printf "%g", v; }'; }
     AS=$(fmt $ALPHA); BS=$(fmt $BETA)
     BASE="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_chat.pt"
     VAR="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_chat_a${AS}_b${BS}_per_channel.pt"
-    VARIANT_TAG="smoothkv_g128_perc_ns${NS}_chat_a${AS}_b${BS}_per_channel"
+    VARIANT_TAG="smoothkv_g${GROUP_SIZE}_perc_ns${NS}_chat_a${AS}_b${BS}_per_channel"
     if [ ! -f "$BASE" ]; then
       /usr/bin/echo "[calib] generating base $BASE  (n_s=$NS, chat-calib)"
       CUDA_VISIBLE_DEVICES=$GPUS $PY run_smoothkv_calibrate.py \
@@ -120,7 +121,7 @@ case "$VARIANT" in
       [ -f "$EXPECTED_BETA_OUT" ] && /bin/mv "$EXPECTED_BETA_OUT" "$VAR" || true
     fi
     calib_path="$VAR"
-    METHOD_ARGS="--kv_quant_method smoothkv --calib_path $calib_path --bits 4 --group_size 128"
+    METHOD_ARGS="--kv_quant_method smoothkv --calib_path $calib_path --bits 4 --group_size $GROUP_SIZE"
     ;;
   *) /usr/bin/echo "variant must be bf16|fp8|pertoken|smkv_fused|smkv_per_channel"; exit 1 ;;
 esac

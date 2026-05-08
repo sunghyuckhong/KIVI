@@ -232,6 +232,25 @@ make run-qwen3-8b ALPHA=0.5 BETA=0.5               # different SmoothKV α/β
 make run-llama LLAMA_MODEL=meta-llama/Meta-Llama-3.1-8B-Instruct
 ```
 
+All per-family runners (`run_eval_qwen3.sh`, `run_eval_llama.sh`,
+`run_eval_mistral.sh`, `run_eval_exaone.sh`) accept `--group_size <N>`
+(default 128). It's plumbed through every quant variant — `fp8`,
+`pertoken`, `smkv_fused`, `smkv_per_channel` — into both the underlying
+`--group_size` flag and the `VARIANT_TAG` (e.g. `fp8_g32`,
+`pertoken_int4_g32`, `smoothkv_fused_g32_*`, `smoothkv_g32_*`) so
+g=32 / g=64 / g=128 results don't collide on disk. `bf16` is unaffected.
+
+Plumb through `parallel_sweep.py`'s `--runner_args`:
+
+```bash
+.venv/bin/python scripts/parallel_sweep.py \
+    --variants fp8 pertoken smkv_fused smkv_per_channel \
+    --tasks gsm8k_cot minerva_math500 gpqa_main_cot_n_shot \
+    --tp 2 --gpus 0,1 --ns 512 --alpha 1.0 --beta 1.0 \
+    --runner scripts/run_eval_qwen3.sh \
+    --runner_args="--size 30b-a3b --group_size 32"
+```
+
 ### Auto-parallel scheduling
 
 When `GPUS=auto` (default), `parallel_sweep.py` picks idle GPUs via

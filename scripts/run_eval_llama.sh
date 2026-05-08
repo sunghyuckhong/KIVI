@@ -20,7 +20,7 @@ export HF_TOKEN="${HF_TOKEN:-$(/bin/cat ~/.cache/huggingface/token 2>/dev/null |
 export NO_ENFORCE_EAGER=1
 
 # ---- args ----
-MODEL_PATH=""; VARIANT=""; TASK=""; GPUS="0"; NS=512; ALPHA=1.0; BETA=1.0
+MODEL_PATH=""; VARIANT=""; TASK=""; GPUS="0"; NS=512; ALPHA=1.0; BETA=1.0; GROUP_SIZE=128
 while [ $# -gt 0 ]; do
   case "$1" in
     --model) MODEL_PATH="$2"; shift 2 ;;
@@ -30,6 +30,7 @@ while [ $# -gt 0 ]; do
     --ns) NS="$2"; shift 2 ;;
     --alpha) ALPHA="$2"; shift 2 ;;
     --beta) BETA="$2"; shift 2 ;;
+    --group_size) GROUP_SIZE="$2"; shift 2 ;;
     *) /usr/bin/echo "Unknown arg: $1"; exit 1 ;;
   esac
 done
@@ -79,8 +80,8 @@ MML32=$((PASS2_MG + PROMPT_BUDGET))
 # ---- variant config + calib ----
 case "$VARIANT" in
   bf16)     METHOD_ARGS="--kv_quant_method bf16";              VARIANT_TAG="bf16" ;;
-  fp8)      METHOD_ARGS="--kv_quant_method fp8 --group_size 128";    VARIANT_TAG="fp8_g128" ;;
-  pertoken) METHOD_ARGS="--kv_quant_method pertoken --bits 4 --group_size 128"; VARIANT_TAG="pertoken_int4_g128" ;;
+  fp8)      METHOD_ARGS="--kv_quant_method fp8 --group_size $GROUP_SIZE";    VARIANT_TAG="fp8_g${GROUP_SIZE}" ;;
+  pertoken) METHOD_ARGS="--kv_quant_method pertoken --bits 4 --group_size $GROUP_SIZE"; VARIANT_TAG="pertoken_int4_g${GROUP_SIZE}" ;;
   smkv_fused)
     # Match Qwen3 runner's calib structure (run_eval_qwen3.sh smkv_fused branch):
     # BASE is generated with α=1.0 β=1.0 so make_alpha_variants's betas-block
@@ -91,7 +92,7 @@ case "$VARIANT" in
     AS=$(fmt $ALPHA); BS=$(fmt $BETA)
     BASE="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}.pt"
     VAR="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_a${AS}_b${BS}_pair.pt"
-    VARIANT_TAG="smoothkv_fused_g128_perc_ns${NS}_a${AS}_b${BS}_pair"
+    VARIANT_TAG="smoothkv_fused_g${GROUP_SIZE}_perc_ns${NS}_a${AS}_b${BS}_pair"
     if [ ! -f "$BASE" ]; then
       /usr/bin/echo "[calib] generating base $BASE  (n_s=$NS, alpha=1.0 beta=1.0)"
       CUDA_VISIBLE_DEVICES=$GPUS $PY run_smoothkv_calibrate.py \
@@ -106,7 +107,7 @@ case "$VARIANT" in
         --base "$BASE" --alphas $ALPHA --betas $BETA \
         --pair_max_k --no_head_uniform_k
     fi
-    METHOD_ARGS="--kv_quant_method smoothkv_fused --calib_path $VAR --bits 4 --group_size 128"
+    METHOD_ARGS="--kv_quant_method smoothkv_fused --calib_path $VAR --bits 4 --group_size $GROUP_SIZE"
     ;;
   smkv_per_channel)
     # Per-(layer, kv_head, head_dim) UNIQUE smoothing factors via runtime
@@ -123,12 +124,12 @@ case "$VARIANT" in
     if [ "$CHAT_CALIB" = "1" ]; then
       BASE="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_chat.pt"
       VAR="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_chat_a${AS}_b${BS}_per_channel.pt"
-      VARIANT_TAG="smoothkv_g128_perc_ns${NS}_chat_a${AS}_b${BS}_per_channel"
+      VARIANT_TAG="smoothkv_g${GROUP_SIZE}_perc_ns${NS}_chat_a${AS}_b${BS}_per_channel"
       calib_chat_flag="--apply_chat_template"
     else
       BASE="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}.pt"
       VAR="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_a${AS}_b${BS}_per_channel.pt"
-      VARIANT_TAG="smoothkv_g128_perc_ns${NS}_a${AS}_b${BS}_per_channel"
+      VARIANT_TAG="smoothkv_g${GROUP_SIZE}_perc_ns${NS}_a${AS}_b${BS}_per_channel"
       calib_chat_flag=""
     fi
     if [ ! -f "$BASE" ]; then
@@ -147,7 +148,7 @@ case "$VARIANT" in
       EXPECTED_BETA_OUT=$(/usr/bin/dirname "$BASE")/$(/usr/bin/basename "$BASE" .pt)_a1_b${BS}.pt
       [ -f "$EXPECTED_BETA_OUT" ] && /bin/mv "$EXPECTED_BETA_OUT" "$VAR" || true
     fi
-    METHOD_ARGS="--kv_quant_method smoothkv --calib_path $VAR --bits 4 --group_size 128"
+    METHOD_ARGS="--kv_quant_method smoothkv --calib_path $VAR --bits 4 --group_size $GROUP_SIZE"
     ;;
   *) /usr/bin/echo "variant invalid"; exit 1 ;;
 esac
