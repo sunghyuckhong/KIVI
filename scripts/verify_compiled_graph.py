@@ -43,6 +43,8 @@ EXPECTED = {
                        r"vllm_kv_quant\.unpack_and_dequant_vcache\("],
     "smoothkv_fused": [r"vllm_kv_quant\.quant_and_pack_vcache\(",
                        r"vllm_kv_quant\.unpack_and_dequant_vcache\("],
+    "nvfp4":          [r"vllm_kv_quant\.fake_quantize_dequantize_nvfp4\("],
+    "smkv_nvfp4":     [r"vllm_kv_quant\.fake_quantize_dequantize_nvfp4\("],
 }
 
 # For baselines we must NOT see any actual quant op invocations. Catches

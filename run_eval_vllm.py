@@ -169,17 +169,26 @@ def output_name(args):
             calib_tag = stem
         return f"{t}_{m}_smoothkv_fused_g{args.group_size}_{calib_tag}{chat}_vllm"
     if args.kv_quant_method == "nvfp4":
-        return f"{t}_{m}_nvfp4{chat}_vllm"
+        # Match the runner's "nvfp4_ns${NS}_chat" tag. The global scales path
+        # encodes the calib used (ns / chat), so derive the tag from it.
+        gs_stem = os.path.basename(args.global_scales_path).replace(".pt", "")
+        # gs_stem looks like nvfp4_global_scales_<model>_ns512_chat
+        try:
+            idx = gs_stem.lower().index(m) + len(m)
+            gs_tag = gs_stem[idx:].lstrip("_")  # "ns512_chat"
+        except ValueError:
+            gs_tag = gs_stem
+        return f"{t}_{m}_nvfp4_{gs_tag}{chat}_vllm"
     if args.kv_quant_method == "smkv_nvfp4":
-        # Tag the SmoothKV calib (same convention as smoothkv) so per-α/β
-        # variants live in different filenames.
+        # Match the runner's "smkv_per_channel_nvfp4_*" tag (the runner
+        # advertises this as variant smkv_per_channel --dtype nvfp4).
         stem = os.path.basename(args.calib_path).replace(".pt", "")
         try:
             idx = stem.lower().index(m) + len(m)
             calib_tag = stem[idx:].lstrip("_")
         except ValueError:
             calib_tag = stem
-        return f"{t}_{m}_smkv_nvfp4_{calib_tag}{chat}_vllm"
+        return f"{t}_{m}_smkv_per_channel_nvfp4_{calib_tag}{chat}_vllm"
     raise ValueError(f"unknown model {args.kv_quant_method}")
 
 

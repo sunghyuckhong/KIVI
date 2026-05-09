@@ -26,7 +26,7 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export HF_TOKEN="${HF_TOKEN:-$(/bin/cat ~/.cache/huggingface/token 2>/dev/null || /bin/echo '')}"
 export NO_ENFORCE_EAGER=1
 
-VARIANT=""; TASK=""; GPUS="0,1"; NS=512; ALPHA=1.0; BETA=1.0; GROUP_SIZE=128
+VARIANT=""; TASK=""; GPUS="0,1"; NS=512; ALPHA=1.0; BETA=1.0; GROUP_SIZE=128; DTYPE="int4"
 while [ $# -gt 0 ]; do
   case "$1" in
     --variant) VARIANT="$2"; shift 2 ;;
@@ -36,13 +36,16 @@ while [ $# -gt 0 ]; do
     --alpha) ALPHA="$2"; shift 2 ;;
     --beta) BETA="$2"; shift 2 ;;
     --group_size) GROUP_SIZE="$2"; shift 2 ;;
+    --dtype) DTYPE="$2"; shift 2 ;;
     *) /usr/bin/echo "Unknown arg: $1"; exit 1 ;;
   esac
 done
 [ -z "$VARIANT" ] || [ -z "$TASK" ] && {
-  /usr/bin/echo "Required: --variant {bf16|fp8|pertoken|smkv_fused|smkv_per_channel} --task {gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot}"
+  /usr/bin/echo "Required: --variant {bf16|fp8|pertoken|smkv_fused|smkv_per_channel|nvfp4} --task {gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot}"
+  /usr/bin/echo "Optional: --dtype {int4|nvfp4}  (only meaningful for smkv_per_channel; default int4)"
   exit 1
 }
+case "$DTYPE" in int4|nvfp4) ;; *) /usr/bin/echo "--dtype must be int4 or nvfp4"; exit 1 ;; esac
 
 case "$TASK" in
   gsm8k_cot|minerva_math500) PROMPT_BUDGET=1536 ;;
@@ -61,13 +64,19 @@ if [ ! -x "$PY" ]; then
   exit 1
 fi
 
-# ---- derive max-gen-tokens from model's native context length ----
-# Rule: mg = 32k if model_max_len >= 32k else model_max_len/2.
+# ---- derive max-gen-tokens (2-pass adaptive, mirrors run_eval_qwen3.sh) ----
+# Rule: pass2_mg = 32k if model_max_len >= 32k else model_max_len/2.
+# pass1_mg = min(4096, pass2_mg). pass2 is skipped if pass1_mg == pass2_mg.
 MODEL_MAX_LEN=$($PY -c "from transformers import AutoConfig; \
 print(AutoConfig.from_pretrained('$MODEL_PATH', trust_remote_code=True).max_position_embeddings)")
-if [ "$MODEL_MAX_LEN" -ge 32768 ]; then MG=32768; else MG=$((MODEL_MAX_LEN / 2)); fi
-MML=$((MG + PROMPT_BUDGET))
-/usr/bin/echo "[mg] model_max_len=$MODEL_MAX_LEN  →  mg=$MG, mml=$MML"
+if [ "$MODEL_MAX_LEN" -ge 32768 ]; then PASS2_MG=32768; else PASS2_MG=$((MODEL_MAX_LEN / 2)); fi
+if [ "$PASS2_MG" -lt 4096 ]; then PASS1_MG=$PASS2_MG; else PASS1_MG=4096; fi
+MML4=$((PASS1_MG + PROMPT_BUDGET))
+MML32=$((PASS2_MG + PROMPT_BUDGET))
+/usr/bin/echo "[mg] model_max_len=$MODEL_MAX_LEN  →  pass1_mg=$PASS1_MG (mml=$MML4), pass2_mg=$PASS2_MG (mml=$MML32)"
+
+# EXAONE-4.5-33B is dense — mirror Qwen3-32B's max_num_seqs (24/8).
+TP=2; MNS_P1=24; MNS_P2=8
 
 # ---- variant config ----
 calib_path=""
@@ -121,44 +130,96 @@ case "$VARIANT" in
       [ -f "$EXPECTED_BETA_OUT" ] && /bin/mv "$EXPECTED_BETA_OUT" "$VAR" || true
     fi
     calib_path="$VAR"
-    METHOD_ARGS="--kv_quant_method smoothkv --calib_path $calib_path --bits 4 --group_size $GROUP_SIZE"
+    if [ "$DTYPE" = "nvfp4" ]; then
+      GS_PATH="logs/calib/nvfp4_global_scales_${MODEL_TAG}_ns${NS}_chat.pt"
+      if [ ! -f "$GS_PATH" ]; then
+        /usr/bin/echo "[gs] deriving NVFP4 global scales $GS_PATH"
+        $PY scripts/derive_nvfp4_global_scales.py --input "$BASE" --output "$GS_PATH"
+      fi
+      METHOD_ARGS="--kv_quant_method smkv_nvfp4 --calib_path $calib_path --global_scales_path $GS_PATH"
+      VARIANT_TAG="smkv_per_channel_nvfp4_${VARIANT_TAG#smoothkv_g${GROUP_SIZE}_}"
+    else
+      METHOD_ARGS="--kv_quant_method smoothkv --calib_path $calib_path --bits 4 --group_size $GROUP_SIZE"
+    fi
     ;;
-  *) /usr/bin/echo "variant must be bf16|fp8|pertoken|smkv_fused|smkv_per_channel"; exit 1 ;;
+  nvfp4)
+    BASE="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_chat.pt"
+    GS_PATH="logs/calib/nvfp4_global_scales_${MODEL_TAG}_ns${NS}_chat.pt"
+    if [ ! -f "$BASE" ]; then
+      /usr/bin/echo "[calib] generating base $BASE  (n_s=$NS, chat-calib)"
+      CUDA_VISIBLE_DEVICES=$GPUS $PY run_smoothkv_calibrate.py \
+        --model "$MODEL_PATH" --num_samples $NS --seq_length 2048 \
+        --alpha 1.0 --beta 1.0 --apply_chat_template \
+        --output "$BASE" --device auto
+    fi
+    if [ ! -f "$GS_PATH" ]; then
+      /usr/bin/echo "[gs] deriving NVFP4 global scales $GS_PATH"
+      $PY scripts/derive_nvfp4_global_scales.py --input "$BASE" --output "$GS_PATH"
+    fi
+    METHOD_ARGS="--kv_quant_method nvfp4 --global_scales_path $GS_PATH"
+    VARIANT_TAG="nvfp4_ns${NS}_chat"
+    ;;
+  *) /usr/bin/echo "variant must be bf16|fp8|pertoken|smkv_fused|smkv_per_channel|nvfp4"; exit 1 ;;
 esac
 
-LOG=logs/run_out/${MODEL_TAG}_${VARIANT_TAG}_${TASK}.log
-RESULT=logs/${TASK}_${MODEL_TAG}_${VARIANT_TAG}_chat_vllm_results.json
+SAMPLES=logs/${TASK}_${MODEL_TAG}_${VARIANT_TAG}_chat_vllm_samples.json
+RESULTS=logs/${TASK}_${MODEL_TAG}_${VARIANT_TAG}_chat_vllm_results.json
+ADAPTIVE=logs/${TASK}_${MODEL_TAG}_${VARIANT_TAG}_chat_vllm_adaptive_results.json
+P1_LOG=logs/run_out/${MODEL_TAG}_${VARIANT_TAG}_pass1_${TASK}.log
+P2_LOG=logs/run_out/${MODEL_TAG}_${VARIANT_TAG}_pass2_${TASK}.log
 /bin/mkdir -p logs/run_out logs/calib
 
-# ---- single-pass run ----
-# Set FORCE=1 to redo a cell whose outputs already exist. Verify-graph
-# stamp is checked on both fresh runs and cached SKIP — see below.
+# ---- Pass 1 (mirrors run_eval_qwen3.sh) ----
 FORCE="${FORCE:-0}"
-if [ "$FORCE" != "1" ] && [ -f "$RESULT" ]; then
-  /usr/bin/echo "[run] SKIP — results.json exists (set FORCE=1 to override)"
+if [ "$FORCE" != "1" ] && [ -f "$SAMPLES" ] && [ -f "$RESULTS" ]; then
+  /usr/bin/echo "[pass1] SKIP — samples + results exist (set FORCE=1 to override)"
 else
-  /usr/bin/echo "[run] $TASK  on $MODEL_PATH  (TP=2, MG=$MG, max_num_seqs=8)"
+  /usr/bin/echo "[pass1] $TASK  on $MODEL_PATH  (TP=$TP, MG=$PASS1_MG, max_num_seqs=$MNS_P1)"
   CUDA_VISIBLE_DEVICES=$GPUS $PY run_eval_vllm.py \
-      $METHOD_ARGS --model "$MODEL_PATH" \
+      $METHOD_ARGS \
+      --model "$MODEL_PATH" \
       --task "$TASK" --apply_chat_template \
-      --max_gen_toks $MG --max_model_len $MML \
-      --max_num_seqs 8 --batch_size 8 --tp 2 \
-      --log_samples 2>&1 | /usr/bin/tee "$LOG"
+      --max_gen_toks $PASS1_MG --max_model_len $MML4 \
+      --max_num_seqs $MNS_P1 --batch_size $MNS_P1 --tp $TP \
+      --log_samples 2>&1 | /usr/bin/tee "$P1_LOG"
 fi
-# Always validate the verify-graph stamp — fresh runs OR cached SKIP. If the
-# cached log carries a FAIL or no stamp at all (e.g. legacy run that wrote
-# its log under a different filename like `ex45a_${VARIANT}_${TASK}.log`),
-# surface it now instead of silently inheriting an untrustworthy result.
-# Backported from the May-6 qwen3/llama runner change.
-if ! /usr/bin/grep -qE "\[verify-graph\] (\[PASS\]|✅[[:space:]]*PASS)" "$LOG" 2>/dev/null; then
-  /usr/bin/echo "ERROR: no explicit verify-graph PASS stamp at $LOG. Aborting." >&2
-  /usr/bin/echo "       (cached cell with a legacy log path? rerun with FORCE=1 to refresh," >&2
-  /usr/bin/echo "        or investigate the failure.)" >&2
+if ! /usr/bin/grep -qE "\[verify-graph\] (\[PASS\]|✅[[:space:]]*PASS)" "$P1_LOG" 2>/dev/null; then
+  /usr/bin/echo "ERROR: pass1 has no explicit verify-graph PASS stamp at $P1_LOG. Aborting." >&2
+  /usr/bin/echo "       (cached cell? rerun with FORCE=1 to refresh.)" >&2
   exit 2
 fi
-/usr/bin/echo "[run] verify-graph: PASS"
+/usr/bin/echo "[pass1] verify-graph: PASS"
+
+# ---- Pass 2 (skip if pass1_mg == pass2_mg — Scenario A) ----
+if [ "$PASS1_MG" -eq "$PASS2_MG" ]; then
+  /usr/bin/echo "[pass2] skipped (pass1_mg == pass2_mg == $PASS1_MG; model_max_len=$MODEL_MAX_LEN doesn't allow longer retry)"
+  /bin/cp "$RESULTS" "$ADAPTIVE"
+elif [ "$FORCE" != "1" ] && [ -f "$ADAPTIVE" ]; then
+  /usr/bin/echo "[pass2] SKIP — adaptive_results.json exists (set FORCE=1 to override)"
+else
+  /usr/bin/echo "[pass2] $TASK  retry truncated subset @ MG=$PASS2_MG  (max_num_seqs=$MNS_P2)"
+  CUDA_VISIBLE_DEVICES=$GPUS $PY scripts/adaptive_pass2.py \
+      --samples "$SAMPLES" --task "$TASK" --model "$MODEL_PATH" \
+      $METHOD_ARGS \
+      --pass1_mg $PASS1_MG --pass2_mg $PASS2_MG \
+      --max_model_len $MML32 --max_num_seqs $MNS_P2 --tp $TP \
+      2>&1 | /usr/bin/tee "$P2_LOG"
+fi
+
+# Validate pass-2 stamp IF pass-2 was supposed to run (not Scenario A).
+if [ "$PASS1_MG" -ne "$PASS2_MG" ]; then
+  if ! /usr/bin/grep -qE "\[verify-graph\] (\[PASS\]|✅[[:space:]]*PASS|\[SKIP-NOOP\])" "$P2_LOG" 2>/dev/null; then
+    /usr/bin/echo "ERROR: pass2 has no explicit verify-graph PASS/SKIP-NOOP stamp at $P2_LOG. Aborting." >&2
+    /usr/bin/echo "       (cached cell? rerun with FORCE=1 to refresh.)" >&2
+    exit 2
+  fi
+  /usr/bin/echo "[pass2] verify-graph: PASS"
+else
+  /usr/bin/echo "[pass2] verify-graph: N/A (Scenario A — pass-2 never invoked, mml=$MODEL_MAX_LEN)"
+fi
+
 /usr/bin/echo ""
 /usr/bin/echo "=================================================================="
-/usr/bin/echo "✅ DONE — $MODEL_TAG / $VARIANT / $TASK graph-verified (.venv-exaone)"
-/usr/bin/echo "   Output: $RESULT"
+/usr/bin/echo "✅ DONE — $MODEL_TAG / $VARIANT / $TASK fully graph-verified (.venv-exaone, 2-pass adaptive)"
+/usr/bin/echo "   Output: $ADAPTIVE"
 /usr/bin/echo "=================================================================="
