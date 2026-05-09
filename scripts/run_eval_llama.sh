@@ -20,7 +20,7 @@ export HF_TOKEN="${HF_TOKEN:-$(/bin/cat ~/.cache/huggingface/token 2>/dev/null |
 export NO_ENFORCE_EAGER=1
 
 # ---- args ----
-MODEL_PATH=""; VARIANT=""; TASK=""; GPUS="0"; NS=512; ALPHA=1.0; BETA=1.0; GROUP_SIZE=128
+MODEL_PATH=""; VARIANT=""; TASK=""; GPUS="0"; NS=512; ALPHA=1.0; BETA=1.0; GROUP_SIZE=128; DTYPE="int4"
 while [ $# -gt 0 ]; do
   case "$1" in
     --model) MODEL_PATH="$2"; shift 2 ;;
@@ -31,13 +31,16 @@ while [ $# -gt 0 ]; do
     --alpha) ALPHA="$2"; shift 2 ;;
     --beta) BETA="$2"; shift 2 ;;
     --group_size) GROUP_SIZE="$2"; shift 2 ;;
+    --dtype) DTYPE="$2"; shift 2 ;;
     *) /usr/bin/echo "Unknown arg: $1"; exit 1 ;;
   esac
 done
 [ -z "$MODEL_PATH" ] || [ -z "$VARIANT" ] || [ -z "$TASK" ] && {
-  /usr/bin/echo "Required: --model HF_PATH --variant {bf16|fp8|pertoken|smkv_fused|smkv_per_channel} --task {gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot}"
+  /usr/bin/echo "Required: --model HF_PATH --variant {bf16|fp8|pertoken|smkv_fused|smkv_per_channel|nvfp4} --task {gsm8k_cot|minerva_math500|gpqa_main_cot_n_shot}"
+  /usr/bin/echo "Optional: --dtype {int4|nvfp4}  (only meaningful for smkv_per_channel; default int4)"
   exit 1
 }
+case "$DTYPE" in int4|nvfp4) ;; *) /usr/bin/echo "--dtype must be int4 or nvfp4"; exit 1 ;; esac
 
 # Derive a short tag from model path. MUST match what run_eval_vllm.py's
 # output_name() produces (model.rstrip('/').split('/')[-1].lower()) so the
@@ -148,7 +151,39 @@ case "$VARIANT" in
       EXPECTED_BETA_OUT=$(/usr/bin/dirname "$BASE")/$(/usr/bin/basename "$BASE" .pt)_a1_b${BS}.pt
       [ -f "$EXPECTED_BETA_OUT" ] && /bin/mv "$EXPECTED_BETA_OUT" "$VAR" || true
     fi
-    METHOD_ARGS="--kv_quant_method smoothkv --calib_path $VAR --bits 4 --group_size $GROUP_SIZE"
+    # Dispatch on --dtype (default int4):
+    #   int4  → smoothkv kernel + per-token int4 (group_size=$GROUP_SIZE)
+    #   nvfp4 → smkv_nvfp4 kernel + per-tensor FP32 / per-group-16 FP8 / per-elem FP4
+    if [ "$DTYPE" = "nvfp4" ]; then
+      GS_TAG="ns${NS}_chat"; [ "$CHAT_CALIB" = "1" ] || GS_TAG="ns${NS}"
+      GS_PATH="logs/calib/nvfp4_global_scales_${MODEL_TAG}_${GS_TAG}.pt"
+      if [ ! -f "$GS_PATH" ]; then
+        /usr/bin/echo "[gs] deriving NVFP4 global scales $GS_PATH"
+        $PY scripts/derive_nvfp4_global_scales.py --input "$BASE" --output "$GS_PATH"
+      fi
+      METHOD_ARGS="--kv_quant_method smkv_nvfp4 --calib_path $VAR --global_scales_path $GS_PATH"
+      VARIANT_TAG="smkv_per_channel_nvfp4_${VARIANT_TAG#smoothkv_g${GROUP_SIZE}_}"
+    else
+      METHOD_ARGS="--kv_quant_method smoothkv --calib_path $VAR --bits 4 --group_size $GROUP_SIZE"
+    fi
+    ;;
+  nvfp4)
+    # Plain NVFP4 (no smoothing). Per-layer global scale derived from raw amax.
+    BASE="logs/calib/smoothkv_${MODEL_TAG}_perc_ns${NS}_chat.pt"
+    GS_PATH="logs/calib/nvfp4_global_scales_${MODEL_TAG}_ns${NS}_chat.pt"
+    if [ ! -f "$BASE" ]; then
+      /usr/bin/echo "[calib] generating base $BASE  (n_s=$NS, chat-calib)"
+      CUDA_VISIBLE_DEVICES=$GPUS $PY run_smoothkv_calibrate.py \
+        --model "$MODEL_PATH" --num_samples $NS --seq_length 2048 \
+        --alpha 1.0 --beta 1.0 --apply_chat_template \
+        --output "$BASE" $( [ "$TP" -gt 1 ] && /usr/bin/echo "--device auto" )
+    fi
+    if [ ! -f "$GS_PATH" ]; then
+      /usr/bin/echo "[gs] deriving NVFP4 global scales $GS_PATH"
+      $PY scripts/derive_nvfp4_global_scales.py --input "$BASE" --output "$GS_PATH"
+    fi
+    METHOD_ARGS="--kv_quant_method nvfp4 --global_scales_path $GS_PATH"
+    VARIANT_TAG="nvfp4_ns${NS}_chat"
     ;;
   *) /usr/bin/echo "variant invalid"; exit 1 ;;
 esac

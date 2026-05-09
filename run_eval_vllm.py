@@ -32,18 +32,27 @@ DEFAULT_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--kv_quant_method", "--kvq", dest="kv_quant_method",
-                   choices=["bf16", "fp16", "fp8", "pertoken", "smoothkv", "smoothkv_fused"],
+                   choices=["bf16", "fp16", "fp8", "pertoken",
+                            "smoothkv", "smoothkv_fused",
+                            "nvfp4", "smkv_nvfp4"],
                    required=True,
                    help="bf16/fp16 are the same no-quant baseline (dtype=auto picks the model's native dtype). "
                         "smoothkv_fused: fold s_K into q_norm/k_norm γ (or qkv_proj rows for non-q-norm "
-                        "models) at load time — zero per-step cost beyond pertoken int4.")
+                        "models) at load time — zero per-step cost beyond pertoken int4. "
+                        "nvfp4: per-tensor FP32 + per-group FP8 + per-element FP4 E2M1. "
+                        "smkv_nvfp4: SmoothKV smoothing followed by NVFP4 quant.")
     p.add_argument("--task",        required=True,
                    help="e.g. truthfulqa_gen, coqa, gsm8k_32k, gpqa_diamond_cot_n_shot_32k, math500_32k")
     p.add_argument("--model",       default=DEFAULT_MODEL,
                    help="HF model path or hub id (e.g. Qwen/Qwen3-8B)")
     p.add_argument("--group_size",  type=int, default=128)
     p.add_argument("--bits",        type=int, default=4, help="bits for pertoken/smoothkv")
-    p.add_argument("--calib_path",  default=None, help="required for --kv_quant_method smoothkv / smoothkv_fused")
+    p.add_argument("--calib_path",  default=None,
+                   help="required for --kv_quant_method smoothkv / smoothkv_fused / smkv_nvfp4")
+    p.add_argument("--global_scales_path", default=None,
+                   help="required for --kv_quant_method nvfp4 / smkv_nvfp4. "
+                        "Per-layer NVFP4 global scales .pt produced by "
+                        "scripts/derive_nvfp4_global_scales.py")
     p.add_argument("--batch_size",  type=int, default=1, help="lm_eval batch_size (vLLM handles internal batching)")
     p.add_argument("--max_gen_toks", type=int, default=None)
     p.add_argument("--tp",          type=int, default=1, help="tensor parallel size")
@@ -113,6 +122,18 @@ def build_kv_quant_config(args):
         return KVCacheQuantConfig(method="smoothkv_fused",
                                   group_size=args.group_size, bits=args.bits,
                                   calib_path=args.calib_path)
+    if args.kv_quant_method == "nvfp4":
+        assert args.global_scales_path, \
+            "--global_scales_path required for nvfp4"
+        return KVCacheQuantConfig(method="nvfp4",
+                                  global_scales_path=args.global_scales_path)
+    if args.kv_quant_method == "smkv_nvfp4":
+        assert args.calib_path, "--calib_path required for smkv_nvfp4"
+        assert args.global_scales_path, \
+            "--global_scales_path required for smkv_nvfp4"
+        return KVCacheQuantConfig(method="smkv_nvfp4",
+                                  calib_path=args.calib_path,
+                                  global_scales_path=args.global_scales_path)
     raise ValueError(f"unknown --model {args.kv_quant_method}")
 
 
@@ -147,6 +168,18 @@ def output_name(args):
         except ValueError:
             calib_tag = stem
         return f"{t}_{m}_smoothkv_fused_g{args.group_size}_{calib_tag}{chat}_vllm"
+    if args.kv_quant_method == "nvfp4":
+        return f"{t}_{m}_nvfp4{chat}_vllm"
+    if args.kv_quant_method == "smkv_nvfp4":
+        # Tag the SmoothKV calib (same convention as smoothkv) so per-α/β
+        # variants live in different filenames.
+        stem = os.path.basename(args.calib_path).replace(".pt", "")
+        try:
+            idx = stem.lower().index(m) + len(m)
+            calib_tag = stem[idx:].lstrip("_")
+        except ValueError:
+            calib_tag = stem
+        return f"{t}_{m}_smkv_nvfp4_{calib_tag}{chat}_vllm"
     raise ValueError(f"unknown model {args.kv_quant_method}")
 
 
