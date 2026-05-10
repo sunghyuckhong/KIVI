@@ -104,14 +104,16 @@ def derive(calib: dict) -> dict:
     gs_V_smooth = NVFP4_NUMERATOR / amax_V_smooth.clamp(min=1e-30)
 
     return {
-        # SmoothKV+NVFP4 (input to NVFP4 = K/s_K)
-        'gs_K_smooth':    gs_K_smooth.float(),
-        'gs_V_smooth':    gs_V_smooth.float(),
+        # SmoothKV+NVFP4 (input to NVFP4 = K/s_K).
+        # Stored as bf16 to match model dtype (kernels.py upcasts to fp32 for
+        # the per-element scale arithmetic, so precision is preserved).
+        'gs_K_smooth':    gs_K_smooth.bfloat16(),
+        'gs_V_smooth':    gs_V_smooth.bfloat16(),
         'amax_K_smooth':  amax_K_smooth.float(),
         'amax_V_smooth':  amax_V_smooth.float(),
         # NVFP4-only (input = K_raw)
-        'gs_K_raw':       gs_K_raw.float(),
-        'gs_V_raw':       gs_V_raw.float(),
+        'gs_K_raw':       gs_K_raw.bfloat16(),
+        'gs_V_raw':       gs_V_raw.bfloat16(),
         'amax_K_raw':     amax_K_raw.float(),
         'amax_V_raw':     amax_V_raw.float(),
         # Bookkeeping
