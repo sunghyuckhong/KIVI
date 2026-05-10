@@ -136,7 +136,7 @@ case "$VARIANT" in
         /usr/bin/echo "[gs] deriving NVFP4 global scales $GS_PATH"
         $PY scripts/derive_nvfp4_global_scales.py --input "$BASE" --output "$GS_PATH"
       fi
-      METHOD_ARGS="--kv_quant_method smkv_nvfp4 --calib_path $calib_path --global_scales_path $GS_PATH"
+      METHOD_ARGS="--kv_quant_method smkv_nvfp4 --calib_path $calib_path --global_scales_path $GS_PATH --group_size 16"
       VARIANT_TAG="smkv_per_channel_nvfp4_${VARIANT_TAG#smoothkv_g${GROUP_SIZE}_}"
     else
       METHOD_ARGS="--kv_quant_method smoothkv --calib_path $calib_path --bits 4 --group_size $GROUP_SIZE"
@@ -156,7 +156,7 @@ case "$VARIANT" in
       /usr/bin/echo "[gs] deriving NVFP4 global scales $GS_PATH"
       $PY scripts/derive_nvfp4_global_scales.py --input "$BASE" --output "$GS_PATH"
     fi
-    METHOD_ARGS="--kv_quant_method nvfp4 --global_scales_path $GS_PATH"
+    METHOD_ARGS="--kv_quant_method nvfp4 --global_scales_path $GS_PATH --group_size 16"
     VARIANT_TAG="nvfp4_ns${NS}_chat"
     ;;
   *) /usr/bin/echo "variant must be bf16|fp8|pertoken|smkv_fused|smkv_per_channel|nvfp4"; exit 1 ;;

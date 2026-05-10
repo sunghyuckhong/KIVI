@@ -122,16 +122,27 @@ def build_kv_quant_config(args):
         return KVCacheQuantConfig(method="smoothkv_fused",
                                   group_size=args.group_size, bits=args.bits,
                                   calib_path=args.calib_path)
-    if args.kv_quant_method == "nvfp4":
-        assert args.global_scales_path, \
-            "--global_scales_path required for nvfp4"
-        return KVCacheQuantConfig(method="nvfp4",
-                                  global_scales_path=args.global_scales_path)
-    if args.kv_quant_method == "smkv_nvfp4":
+    if args.kv_quant_method in ("nvfp4", "smkv_nvfp4"):
+        # NVFP4 spec block size is 16 elements per micro-block. The kernel
+        # already hard-codes 16 internally, but we also pin it on the config
+        # object so logs and downstream consumers (adaptive_pass2.py,
+        # KVCacheQuantConfig.__repr__) can't claim group_size=128.
+        if args.group_size not in (16, 128):  # 128 is parser default
+            raise ValueError(
+                f"--group_size must be 16 for {args.kv_quant_method} "
+                f"(NVFP4 micro-block size); got {args.group_size}")
+        if args.kv_quant_method == "nvfp4":
+            assert args.global_scales_path, \
+                "--global_scales_path required for nvfp4"
+            return KVCacheQuantConfig(method="nvfp4",
+                                      group_size=16,
+                                      global_scales_path=args.global_scales_path)
+        # smkv_nvfp4
         assert args.calib_path, "--calib_path required for smkv_nvfp4"
         assert args.global_scales_path, \
             "--global_scales_path required for smkv_nvfp4"
         return KVCacheQuantConfig(method="smkv_nvfp4",
+                                  group_size=16,
                                   calib_path=args.calib_path,
                                   global_scales_path=args.global_scales_path)
     raise ValueError(f"unknown --model {args.kv_quant_method}")

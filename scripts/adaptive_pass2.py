@@ -47,9 +47,13 @@ def parse_args():
     p.add_argument("--model", required=True,
                    help="HF model path or hub id (e.g. Qwen/Qwen3-8B)")
     p.add_argument("--kv_quant_method", "--kvq", dest="kv_quant_method",
-                   choices=["bf16", "fp16", "fp8", "pertoken", "smoothkv", "smoothkv_fused"],
+                   choices=["bf16", "fp16", "fp8", "pertoken",
+                            "smoothkv", "smoothkv_fused",
+                            "nvfp4", "smkv_nvfp4"],
                    required=True)
     p.add_argument("--calib_path", default=None)
+    p.add_argument("--global_scales_path", default=None,
+                   help="required for --kv_quant_method nvfp4 / smkv_nvfp4")
     p.add_argument("--group_size", type=int, default=128)
     p.add_argument("--bits", type=int, default=4)
     p.add_argument("--pass1_mg", type=int, required=True)
@@ -95,6 +99,25 @@ def build_kv_quant_config(args):
         return KVCacheQuantConfig(method="smoothkv_fused",
                                   group_size=args.group_size, bits=args.bits,
                                   calib_path=args.calib_path)
+    if args.kv_quant_method in ("nvfp4", "smkv_nvfp4"):
+        # NVFP4 spec block size is 16 elements; mirror run_eval_vllm.py.
+        if args.group_size not in (16, 128):  # 128 is parser default
+            raise ValueError(
+                f"--group_size must be 16 for {args.kv_quant_method} "
+                f"(NVFP4 micro-block size); got {args.group_size}")
+        if args.kv_quant_method == "nvfp4":
+            assert args.global_scales_path, \
+                "--global_scales_path required for nvfp4"
+            return KVCacheQuantConfig(method="nvfp4",
+                                      group_size=16,
+                                      global_scales_path=args.global_scales_path)
+        assert args.calib_path, "--calib_path required for smkv_nvfp4"
+        assert args.global_scales_path, \
+            "--global_scales_path required for smkv_nvfp4"
+        return KVCacheQuantConfig(method="smkv_nvfp4",
+                                  group_size=16,
+                                  calib_path=args.calib_path,
+                                  global_scales_path=args.global_scales_path)
     raise ValueError(f"unknown --kv_quant_method {args.kv_quant_method}")
 
 
