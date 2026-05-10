@@ -101,6 +101,8 @@ def monkey_patch_rope(model, collector):
         ("qwen3_moe", "transformers.models.qwen3_moe.modeling_qwen3_moe"),
         ("qwen2",     "transformers.models.qwen2.modeling_qwen2"),
         ("exaone4",   "transformers.models.exaone4.modeling_exaone4"),
+        ("exaone4_5", "transformers.models.exaone4_5.modeling_exaone4_5"),
+        ("exaone_moe","transformers.models.exaone_moe.modeling_exaone_moe"),
     ]:
         try:
             mod = __import__(modeling_path, fromlist=["apply_rotary_pos_emb"])
