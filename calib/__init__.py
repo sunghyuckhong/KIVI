@@ -9,8 +9,14 @@
 #                         s_K = max|K|^α / max|Q|^(1-α)
 #                         s_V = max|V|^β
 
-from .hooks import install_v_hook, monkey_patch_rope
+from .hooks import install_v_hook, install_nope_qk_hook, monkey_patch_rope
 from .scales import compute_scales
 from .stat_collector import StatCollector
 
-__all__ = ["StatCollector", "install_v_hook", "monkey_patch_rope", "compute_scales"]
+__all__ = [
+    "StatCollector",
+    "install_v_hook",
+    "install_nope_qk_hook",
+    "monkey_patch_rope",
+    "compute_scales",
+]

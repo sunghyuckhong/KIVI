@@ -59,6 +59,59 @@ def install_v_hook(model, collector):
     return hooks
 
 
+def install_nope_qk_hook(model, collector):
+    """Capture Q/K via q_norm / k_norm forward hooks for layers that skip
+    ``apply_rotary_pos_emb`` (hybrid-attention models with global-NoPE
+    layers, e.g. EXAONE-4.5: sliding-window layers apply RoPE, global
+    layers don't).
+
+    For NoPE layers, the K that hits the cache is the q_norm/k_norm output
+    (no rotation applied) — so hooking post-norm captures the actual cached
+    K. The existing ``monkey_patch_rope`` covers RoPE layers; this fills
+    the gap for the rest.
+
+    Only installs on a layer when ALL of:
+      - ``self_attn.is_sliding`` exists (hybrid-attention attr)
+      - ``is_sliding == False``
+      - ``self_attn.sliding_window`` is not None (model uses sliding_window;
+        global = NoPE branch)
+      - ``self_attn.q_norm`` and ``self_attn.k_norm`` exist
+
+    Non-hybrid architectures (Qwen3 / Llama / Mistral) fail the attribute
+    check and the hook is silently skipped — their existing post-RoPE
+    capture is unchanged.
+
+    Returns hook handles.
+    """
+    hooks = []
+    for i, layer in enumerate(_get_layers(model)):
+        attn = layer.self_attn
+        is_hybrid_nope = (
+            hasattr(attn, 'is_sliding')
+            and not attn.is_sliding
+            and getattr(attn, 'sliding_window', None) is not None
+            and hasattr(attn, 'q_norm')
+            and hasattr(attn, 'k_norm')
+        )
+        if not is_hybrid_nope:
+            continue
+
+        def make_qk_hook(layer_idx, which):
+            def hook(module, inp, out):
+                # In EXAONE-4.5, q_norm/k_norm are applied to tensors of
+                # shape (B, num_heads, T, D) — already reshaped/transposed
+                # before the norm in Attention.forward.
+                if which == 'q':
+                    collector.update_q(layer_idx, out)
+                else:
+                    collector.update_k(layer_idx, out)
+            return hook
+
+        hooks.append(attn.q_norm.register_forward_hook(make_qk_hook(i, 'q')))
+        hooks.append(attn.k_norm.register_forward_hook(make_qk_hook(i, 'k')))
+    return hooks
+
+
 def monkey_patch_rope(model, collector):
     """Capture post-RoPE Q and K by wrapping each architecture's
     ``apply_rotary_pos_emb`` and tracking the active layer index.

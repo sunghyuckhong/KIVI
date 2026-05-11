@@ -31,6 +31,7 @@ from datasets import load_dataset
 from calib import (
     StatCollector,
     compute_scales,
+    install_nope_qk_hook,
     install_v_hook,
     monkey_patch_rope,
 )
@@ -183,6 +184,11 @@ def main():
     )
     monkey_patch_rope(model, collector)
     hooks = install_v_hook(model, collector)
+    # Hybrid-attention models (e.g. EXAONE-4.5) skip apply_rotary_pos_emb on
+    # global-NoPE layers — the RoPE patch never fires there. Capture those
+    # layers' K via post-norm forward hooks. Non-hybrid models silently
+    # skip this (no-op).
+    hooks += install_nope_qk_hook(model, collector)
 
     print(f"Loading dataset: {args.dataset}")
     ds = load_calib_dataset(args)
